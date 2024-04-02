@@ -73,17 +73,25 @@ def map_vol_function_by_blocking(func0, data3d, block_shape, margins_shape):
     logging.debug(f"map_vol_function_by_blocking() , data3d.shape:{data3d.shape} ,dtype:{data3d.dtype} block_shape:{block_shape}, margins_shape:{margins_shape}")
 
     #If for some reason the block shape is not big enough along one or more directions
-    bl_step0 = np.array([ block_shape[i]-2*margins_shape[i] for i in range(3) ])
-    bl_step = np.where( bl_step0<=0, np.array(block_shape), bl_step0)
+    # bl_step0 = np.array([ block_shape[i]-2*margins_shape[i] for i in range(3) ])
+    # bl_step = np.where( bl_step0<=0 , np.array(block_shape), bl_step0)
+
+    bl_step = np.array([ block_shape[i]-2*margins_shape[i] for i in range(3) ]) #default step
+    for i in range(3):
+        if bl_step[i]<0:
+            #bl_step[i]=block_shape[i]
+            raise ValueError(f"margin with shape {margins_shape} too large  compared with block_shape {block_shape} at dim {i}. It should be block_shape[i]>2*margins_shape[i].")
+        if block_shape[i]>=shapedata[i]:
+            bl_step[i]=shapedata[i]
 
     logging.debug(f"bl_step:{bl_step}")
 
     datares = None #To collect results, it will be setup initially with correct dtype when first results arrive
     b_continue=True
 
+    regions_plan = []
+
     for iz0 in range(0,shapedata[0],bl_step[0]):
-        if not b_continue:
-            break
 
         iz00=iz0
         iz1 = iz0 + block_shape[0]
@@ -93,8 +101,7 @@ def map_vol_function_by_blocking(func0, data3d, block_shape, margins_shape):
             if iz00<0: iz00=0
         
         for iy0 in range(0,shapedata[1], bl_step[1]):
-            if not b_continue:
-                break
+
             iy00 = iy0
             iy1 = iy0 + block_shape[1]
             if iy1>shapedata[1]:
@@ -111,47 +118,52 @@ def map_vol_function_by_blocking(func0, data3d, block_shape, margins_shape):
                     if ix00<0: ix00=0
 
                 logging.info(f"BLOCK: New block, intended origin iz0,iy0,ix0 = {iz0},{iy0},{ix0} , use origin iz00,iy00,ix00 = {iz00},{iy00},{ix00} , end iz1,iy1,ix1 = {iz1},{iy1},{ix1}")
-
-                #Get the data block
-                datablock0 = data3d[iz00:iz1, iy00:iy1, ix00:ix1]
                 
-                logging.info("BLOCK: Start calculation with this block")
+                regions_plan.append((iz0,iy0,ix0, iz00,iy00,ix00, iz1,iy1,ix1))
 
-                #Do calculation with this datablock
-                data_res_block = func0(datablock0)
+    logging.info("Regions_plan (iz0,iy0,ix0, iz00,iy00,ix00, iz1,iy1,ix1)")
+    logging.info(f"{regions_plan}")
 
-                logging.info("BLOCK: This block's calculation completed")
+    for reg0 in regions_plan:
+        iz0,iy0,ix0, iz00,iy00,ix00, iz1,iy1,ix1 = reg0
 
-                if data_res_block is None:
-                    raise ValueError( "BLOCK: data_res_block is None. Check for errors. Stopping calculation")
-                
-                #Store the datablock result, only the valid part
-                #unless it is the leftmost (first block) of the dimension given
-                jz0=0
-                jy0=0
-                jx0=0
+        #Get the data block
+        datablock0 = data3d[iz00:iz1, iy00:iy1, ix00:ix1]
+        
+        logging.info(f"BLOCK: Start calculation with block [{iz00}:{iz1},{iy00}:{iy1},{ix00}:{ix1}]")
 
-                #Crop the padded on the left side
-                if iz0 !=0 :
-                    #jz0 += int( (block_shape[0] - bl_step[0]) / 2)
-                    jz0 += margins_shape[0]
-                if iy0 !=0:
-                    #jy0 += int( (block_shape[1] - bl_step[1]) / 2)
-                    jy0 += margins_shape[1]
-                if ix0 !=0:
-                    #jx0 += int( (block_shape[2] - bl_step[2]) / 2)
-                    jx0 += margins_shape[2]
-                
-                logging.info(f"BLOCK:Crop block result from origin jz0,jy0,jx0 = : {jz0},{jy0},{jx0}")
-                
-                logging.info(f"BLOCK:Copying cropped block to datares")
+        #Do calculation with this datablock
+        data_res_block = func0(datablock0)
 
-                if datares is None:
-                    #Initialise
-                    logging.info("BLOCK: First block result initialises datares")
-                    datares = np.zeros(shapedata, dtype=data_res_block.dtype)
+        logging.info("BLOCK: This block's calculation completed")
 
-                datares[ iz00+jz0 : iz00+data_res_block.shape[0] , iy00+jy0 : iy00+data_res_block.shape[1] , ix00+jx0 : ix00+data_res_block.shape[2]] = data_res_block[jz0: , jy0: , jx0: ]
+        if data_res_block is None:
+            raise ValueError( "BLOCK: data_res_block is None. Check for errors. Stopping calculation")
+        
+        #Store the datablock result, only the valid part
+        #unless it is the leftmost (first block) of the dimension given
+        jz0=0
+        jy0=0
+        jx0=0
+
+        #Crop the padded on the left side
+        if iz0 !=0 :
+            #jz0 += int( (block_shape[0] - bl_step[0]) / 2)
+            jz0 += margins_shape[0]
+        if iy0 !=0:
+            #jy0 += int( (block_shape[1] - bl_step[1]) / 2)
+            jy0 += margins_shape[1]
+        if ix0 !=0:
+            #jx0 += int( (block_shape[2] - bl_step[2]) / 2)
+            jx0 += margins_shape[2]
+        
+        if datares is None:
+            #Initialise
+            logging.info("BLOCK: First block result initialises datares")
+            datares = np.zeros(shapedata, dtype=data_res_block.dtype)
+
+        logging.info(f"BLOCK:Crop block result from origin jz0,jy0,jx0 = : {jz0},{jy0},{jx0} and copying to datares")
+        datares[ iz00+jz0 : iz00+data_res_block.shape[0] , iy00+jy0 : iy00+data_res_block.shape[1] , ix00+jx0 : ix00+data_res_block.shape[2]] = data_res_block[jz0: , jy0: , jx0: ]
 
     logging.info("BLOCK: Completed. Results should be in datares")
     
