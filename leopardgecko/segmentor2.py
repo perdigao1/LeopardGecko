@@ -32,28 +32,30 @@ Segmentation smilar to segmentor.py but with differences, based in kaggle experi
 """
 import numpy as np
 import dask.array as da
-
 #import subprocess
 import tempfile
-
 from pathlib import Path
-
 import os
 cwd = os.getcwd()
-#print(cwd)
-
 import tempfile
 import logging
 from types import SimpleNamespace
-
 import tqdm #progress bar in iterations
 
-from . import metrics
-from .utils import *
+#from . import metrics
+#from .utils import *
 
 import pandas as pd
 
-class cNN1_train_settings:
+from torch.utils.data import Dataset, DataLoader, random_split, Subset
+import torch
+import torch.nn as nn
+import albumentations as alb
+import albumentations.pytorch
+
+import segmentation_models_pytorch as smp
+
+class cSegmentor2_Settings:
     """
     Settings only. Avoid functions. This will be pickled for loading and saving
     """
@@ -72,41 +74,45 @@ class cNN1_train_settings:
     #'downsample': False,
     #'training_set_proportion': 0.8,
     cuda_device=0
-    num_cyc_frozen=8
-    num_cyc_unfrozen=5
+
+    nn1_num_cyc_frozen=8
+    nn1_num_cyc_unfrozen=5
     #patience=3
 
-    loss_criterion='DiceLoss'
+    nn1_loss_criterion='DiceLoss'
     #'alpha': 0.75,
     #'beta': 0.25,
 
-    eval_metric='MeanIoU'
+    nn1_eval_metric='MeanIoU'
     #'pct_lr_inc': 0.3,
     #'starting_lr': '1e-6',
     #'end_lr': 50,
     #'lr_find_epochs': 1,
     #'lr_reduce_factor': 500,
     
-    model={
+    # Models as a list, maximium 3 items
+    nn1_models_instance_generator = [{
     'class':'smp', #smp: segmentation models pytorch
-    'type': 'U_Net',
+    'arch': 'U_Net',
     'encoder_name': 'resnet34',
-    'encoder_weights': 'imagenet', # TODO: support for using existing models
-    }
+    'encoder_weights': 'imagenet', # TODO: support for using existing models (loading)
+    'in_nchannels':1,
+    'nclasses':1,
+    }]
 
-class cNN2_train_settings:
-    """
-    Settings only. Avoid functions. This will be pickled for loading and saving
-    """
+    nn1_axes_to_models_indices = [0,0,0] # By default use the same model for all axes
+    # To use different models, use [0,1,2] for model0 along z, model1 along y, and model2 along x
+    
+    nn1_batch_size=2
 
-    hidden_layer_sizes = [10,10]
-    activation = 'tanh'
+    nn2_hidden_layer_sizes = [10,10]
+    nn2_activation = 'tanh'
 
     #'learning_rate_init':0.001,
     #'solver':'sgd',
-    max_iter = 1000
-    ntrain = 262144 #Note that this is not a MLPClassifier parameter
-    cuda_device = 0
+    nn2_max_iter = 1000
+
+    nn2_ntrain = 262144 #Note that this is not a MLPClassifier parameter
 
 class cMultiAxisRotationsSegmentor2():
 
@@ -123,19 +129,19 @@ class cMultiAxisRotationsSegmentor2():
 
         self._tempdir_pred=None
 
+        self._NN1_models=None
+        self._NN2_model=None
+        
+
     def _init_settings(self):
         #Initialise internal settings for the neural networks
-        self.NN1trainsettings0 = cNN1_train_settings()
+        self.settings = cSegmentor2_Settings()
 
-        #Default setting for NN" MLP classifier
-        self.NN2settings = cNN2_train_settings()
 
     def set_cuda_device(self,n):
         self._cuda_device=n
-        self.NN1_train_settings.cuda_device=n
-        self.NN1_pred_settings.cuda_device=n
+        self.settings.cuda_device=n
 
-        self.NN2settings.cuda_device=n
 
     
     def train(self, traindata, trainlabels, get_metrics=True):
@@ -143,12 +149,10 @@ class cMultiAxisRotationsSegmentor2():
         Train NN1 (volume segmantics) and NN2 (MLP Classifier)
 
         Returns:
-            Tuple nn1_acc_dice_s, (nn2_acc, nn2_dice)
-            with nn1_acc_dice_s being a list of accuracy, dice of each predictions
-
-            and (nn2_acc, nn2_dice) being the accuracy and dice result from NN1+NN2 combination
+            TODO
             
         """
+
         logging.debug(f"train()")
         trainlabels0 = None
         traindata0=None
@@ -176,10 +180,12 @@ class cMultiAxisRotationsSegmentor2():
         nsets=len(traindata0)
         logging.info(f"nsets:{nsets}")
 
-        
         # ** Train NN1
         self.NN1_train(traindata0, trainlabels0)
         #(This does not return anything.)
+
+
+
 
         # ** Predict NN1
         #Does the multi-axis multi-rotation predictions
@@ -277,6 +283,7 @@ class cMultiAxisRotationsSegmentor2():
 
         return None
     
+    
     def predict(self, data_in, use_dask=False):
         """
         Creates predicted labels from a whole data volume
@@ -332,75 +339,239 @@ class cMultiAxisRotationsSegmentor2():
         
         """
 
+        logging.info("NN1_train()")
+
         if not(isinstance(traindata_list, list) and isinstance(trainlabels_list, list) ):
             raise ValueError("Invalid traindata_list or trainlabels_list")
         
-        tempdir_data=None
-        tempdir_seg=None
-        if self.temp_data_outdir is None:
-            tempdir_data = tempfile.TemporaryDirectory()
-            tempdir_data_path=Path(tempdir_data.name)
+        # tempdir_data=None
+        # tempdir_seg=None
+        # if self.temp_data_outdir is None:
+        #     tempdir_data = tempfile.TemporaryDirectory()
+        #     tempdir_data_path=Path(tempdir_data.name)
 
-            tempdir_seg = tempfile.TemporaryDirectory()
-            tempdir_seg_path = Path(tempdir_seg.name)
+        #     tempdir_seg = tempfile.TemporaryDirectory()
+        #     tempdir_seg_path = Path(tempdir_seg.name)
 
-            # tempdir_pred= tempfile.TemporaryDirectory()
-            # tempdir_pred_path = Path(tempdir_pred.name)
-        else:
-            tempdir_data_path=Path(self.temp_data_outdir,"NN1_data")
-            tempdir_data_path.mkdir(exist_ok=True)
-            tempdir_seg_path=Path(self.temp_data_outdir, "NN1_seg")
-            tempdir_seg_path.mkdir(exist_ok=True)
+        #     # tempdir_pred= tempfile.TemporaryDirectory()
+        #     # tempdir_pred_path = Path(tempdir_pred.name)
+        # else:
+        #     tempdir_data_path=Path(self.temp_data_outdir,"NN1_data")
+        #     tempdir_data_path.mkdir(exist_ok=True)
+        #     tempdir_seg_path=Path(self.temp_data_outdir, "NN1_seg")
+        #     tempdir_seg_path.mkdir(exist_ok=True)
 
-        # tempdir_data = tempfile.TemporaryDirectory()
-        # tempdir_data_path=Path(tempdir_data.name)
-        logging.info(f"tempdir_data_path:{tempdir_data_path}")
+        # # tempdir_data = tempfile.TemporaryDirectory()
+        # # tempdir_data_path=Path(tempdir_data.name)
+        # logging.info(f"tempdir_data_path:{tempdir_data_path}")
 
-        # tempdir_seg = tempfile.TemporaryDirectory()
-        # tempdir_seg_path = Path(tempdir_seg.name)
-        logging.info(f"tempdir_seg_path:{tempdir_seg_path}")
+        # # tempdir_seg = tempfile.TemporaryDirectory()
+        # # tempdir_seg_path = Path(tempdir_seg.name)
+        # logging.info(f"tempdir_seg_path:{tempdir_seg_path}")
 
         # Keep track of the number of labels
         max_label_no = 0
         label_codes = None
 
-        # Set up the DataSlicer and slice the data volumes into image files
-        for count , (traindata0, trainlabels0) in enumerate(zip(traindata_list, trainlabels_list)):
-            slicer = TrainingDataSlicer(traindata0, trainlabels0, self.NN1_train_settings)
-            data_prefix, label_prefix = f"data{count}", f"seg{count}"
-            slicer.output_data_slices(tempdir_data_path, data_prefix)
-            slicer.output_label_slices(tempdir_seg_path, label_prefix)
-            if slicer.num_seg_classes > max_label_no:
-                max_label_no = slicer.num_seg_classes
-                label_codes = slicer.codes
+        # # Set up the DataSlicer and slice the data volumes into image files
+        # for count , (traindata0, trainlabels0) in enumerate(zip(traindata_list, trainlabels_list)):
+        #     slicer = TrainingDataSlicer(traindata0, trainlabels0, self.NN1_train_settings)
+        #     data_prefix, label_prefix = f"data{count}", f"seg{count}"
+        #     slicer.output_data_slices(tempdir_data_path, data_prefix)
+        #     slicer.output_label_slices(tempdir_seg_path, label_prefix)
+        #     if slicer.num_seg_classes > max_label_no:
+        #         max_label_no = slicer.num_seg_classes
+        #         label_codes = slicer.codes
 
-        # Set up the 2dTrainer
-        self.trainer = VolSeg2dTrainer(tempdir_data_path, tempdir_seg_path, max_label_no, self.NN1_train_settings)
-        # Train the model, first frozen, then unfrozen
-        num_cyc_frozen = self.NN1_train_settings.num_cyc_frozen
-        num_cyc_unfrozen = self.NN1_train_settings.num_cyc_unfrozen
-        #model_type = settings.model["type"].name
+        # # Set up the 2dTrainer
+        # self.trainer = VolSeg2dTrainer(tempdir_data_path, tempdir_seg_path, max_label_no, self.NN1_train_settings)
+        
+        # # Train the model, first frozen, then unfrozen
+        # num_cyc_frozen = self.NN1_train_settings.num_cyc_frozen
+        # num_cyc_unfrozen = self.NN1_train_settings.num_cyc_unfrozen
+        # #model_type = settings.model["type"].name
 
-        if num_cyc_frozen > 0:
-            self.trainer.train_model(
-                self.model_NN1_path, num_cyc_frozen, self.NN1_train_settings.patience, create=True, frozen=True
-            )
-        if num_cyc_unfrozen > 0 and num_cyc_frozen > 0:
-            self.trainer.train_model(
-                self.model_NN1_path, num_cyc_unfrozen, self.NN1_train_settings.patience, create=False, frozen=False
-            )
-        elif num_cyc_unfrozen > 0 and num_cyc_frozen == 0:
-            self.trainer.train_model(
-                self.model_NN1_path, num_cyc_unfrozen, self.NN1_train_settings.patience, create=True, frozen=False
-            )
+        # if num_cyc_frozen > 0:
+        #     self.trainer.train_model(
+        #         self.model_NN1_path, num_cyc_frozen, self.NN1_train_settings.patience, create=True, frozen=True
+        #     )
+        # if num_cyc_unfrozen > 0 and num_cyc_frozen > 0:
+        #     self.trainer.train_model(
+        #         self.model_NN1_path, num_cyc_unfrozen, self.NN1_train_settings.patience, create=False, frozen=False
+        #     )
+        # elif num_cyc_unfrozen > 0 and num_cyc_frozen == 0:
+        #     self.trainer.train_model(
+        #         self.model_NN1_path, num_cyc_unfrozen, self.NN1_train_settings.patience, create=True, frozen=False
+        #     )
 
-        # Clean up all the saved slices
-        slicer.clean_up_slices()
+        # # Clean up all the saved slices
+        # slicer.clean_up_slices()
 
-        if not tempdir_data is None:
-            logging.info("tempdir_data and tempdir_seg cleanup.")
-            tempdir_data.cleanup()
-            tempdir_seg.cleanup()
+        # if not tempdir_data is None:
+        #     logging.info("tempdir_data and tempdir_seg cleanup.")
+        #     tempdir_data.cleanup()
+        #     tempdir_seg.cleanup()
+
+
+
+        # TODO: Prepare training of model(s)
+        # Create DataLoader, along different axis
+        # Create models (or load models)
+        # Run training loop
+
+
+        nmodels = np.unique(self.settings.nn1_axes_to_models_indices)
+        logging.info(f"nmodels:{nmodels}")
+
+        def get_model_from_dict(dict0):
+            # get segm model from dictionary item
+            model0=None
+
+            if dict0['class'].lower=='smp': #unet, AttentionNet (manet) and fpn
+                #Segmentation models pytorch
+                arch = dict0['arch'].lower()
+                if arch=="unet" or arch=="u_net":
+                    NN_class = smp.Unet
+                elif arch=="manet":
+                    model0 = smp.MAnet
+                elif arch=="fpn":
+                    model0 = smp.FPN
+                else:
+                    raise ValueError(f"arch:{arch} not valid.")
+                
+                model0 = NN_class(
+                    encoder_name = dict0['encoder_name'],
+                    encoder_weights = dict0['encoder_weights'],
+                    in_channels = dict0['in_nchannels'],
+                    classes = dict0['nclasses'],
+                    activation = "sigmoid"
+                    )
+            else:
+                raise ValueError(f"class {dict0['class']} not supported.")
+            
+            return model0
+
+        firstmodel = get_model_from_dict(self.settings.nn1_models_instance_generator[0])
+        _ = firstmodel.to(self.settings.cuda_device)
+
+        self._NN1_models.append(firstmodel)
+
+        if nmodels>1:
+            for imodel in range(1,nmodels):
+                model1=None
+                if imodel>=len(self.settings.nn1_models_instance_generator):
+                    #use the first model type as reference to generate next
+                    model1 = self.settings.nn1_models_instance_generator[0]
+                else:
+                    model1 = self.settings.nn1_models_instance_generator[imodel]
+                _ = model1.to(self.settings.cuda_device)
+                self._NN1_models.append(model1)
+
+        logging.info(f"Created {len(self._NN1_models)} models for axes z,y,x with order {self.settings.nn1_axes_to_models_indices}.")
+
+
+        tfms0 =alb.Compose(
+            [
+            # Images can have different sizes, so don't use fixed target size, replace with CropAndPad
+            #    alb.RandomSizedCrop(
+            #         min_max_height=(img_size // 2, img_size),
+            #         height=img_size,
+            #         width=img_size,
+            #         p=0.5,
+            #     ),
+            alb.CropAndPad(px=None, percent=-0.1, keep_size=False), #May require mid parameters to be specified
+
+            alb.VerticalFlip(p=0.5),
+            alb.RandomRotate90(p=0.5),
+            alb.Transpose(p=0.5),
+            alb.OneOf(
+                [
+                    alb.ElasticTransform(
+                        alpha=120, sigma=120 * 0.07, alpha_affine=120 * 0.04, p=0.5
+                    ),
+                    alb.GridDistortion(p=0.5),
+                    alb.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+                ],
+                p=0.5,
+            ),
+            alb.CLAHE(p=0.5),
+            alb.OneOf([alb.RandomBrightnessContrast(p=0.5),alb.RandomGamma(p=0.5)], p=0.5),
+            ]
+        )
+
+
+        if not self.NN1_train_settings.data_vol_norm_process is None:
+
+
+            #Normalise volumetric data to setting chosen
+            traindata_list0=[]
+
+            if "mean_stdev_3" in self.NN1_train_settings.data_vol_norm_process:
+                # Clip data to -3*stdev and +3*stdev and normalises to values between 0 and 1
+                for d0 in traindata_list:
+                    d0_mean = np.mean(d0)
+                    d0_std = np.std(d0)
+
+                    if d0_std==0:
+                        raise ValueError("Error. Stdev of data volume is zero.")
+                    
+                    d0_corr = (d0.astype(np.float32) - d0_mean) / d0_std
+                    d0_corr = (np.clip(d0_corr, -3.0, 3.0) +3.0) / 6.0
+
+                    traindata_list0.append(d0_corr)
+
+            elif "mean_stdev_3_5" in self.NN1_train_settings.data_vol_norm_process:
+                for d0 in traindata_list:
+                    d0_mean = np.mean(d0)
+                    d0_std = np.std(d0)
+
+                    if d0_std==0:
+                        raise ValueError("Error. Stdev of data volume is zero.")
+                    
+                    d0_corr = (d0.astype(np.float32) - d0_mean) / d0_std
+                    d0_corr = (np.clip(d0_corr, -3.0, 5.0) +3.0) / 8.0
+
+                    traindata_list0.append(d0_corr)
+                
+            #replace traindata_list with corrected
+            traindata_list = traindata_list0
+
+
+        logging.info("Creating train and validation dataloaders for each model")
+        # Dataloader(s) will depend on the number of models and respective axes
+        dataloaders_train=[]
+        dataloaders_valid=[]
+        for i in range(nmodels):
+            model_axes= np.flatnonzero(
+                np.array(self.settings.nn1_axes_to_models_indices) == i
+            ).tolist()
+
+            ds0 = Input_dataset_along_axes(traindata_list, trainlabels_list,
+                                           model_axes,
+                                           tfms= tfms0,
+                                           preprocess=self.settings.data_vol_norm_process)
+
+            dset1, dset2 = torch.utils.data.random_split(ds0, [0.8,0.2])
+
+            dl_train = DataLoader(dset1, batch_size=self.settings.nn1_batch_size)
+            dl_test = DataLoader(dset2, batch_size=self.settings.nn1_batch_size)
+
+            dataloaders_train.append(dl_train)
+            dataloaders_valid.append(dl_test)
+
+            logging.info(f"model {i}, len(dataloaders_train): {len(dataloaders_train)}, len(dataloaders_valid): {len(dataloaders_valid)}")
+
+        logging.info("Dataloaders created.")
+        logging.info(f"len(dataloaders_train): {len(dataloaders_train)}")
+        logging.info(f"len(dataloaders_train): {len(dataloaders_train)}")
+
+        
+        #TODO
+        # Setup losses and optimizers
+
+
+
+
 
 
     def NN1_predict(self,data_to_predict, pred_folder_out):
@@ -443,6 +614,8 @@ class cMultiAxisRotationsSegmentor2():
         from . import ConsistencyScore
         # For consistency score determination from predictions if set
         consistencyscore0 = ConsistencyScore.cConsistencyScoreMultipleWayProbsAccumulate()
+
+
 
 
         logging.debug("NN1_predict()")
@@ -1169,3 +1342,56 @@ class cMultiAxisRotationsSegmentor2():
     def __enter__(self):
         #Required to run with `with`
         return self
+
+
+class Input_dataset_along_axes(Dataset):
+    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2], tfms=None, preprocess=None):
+        
+        self.datavols = []
+        self.labelsvols = []
+
+        for d0, l0 in zip(datavols_list,labelsvols_list):
+
+            #Preprocess? TODO
+
+            for ax0 in axes:
+                if ax0==0:
+                    self.datavols.append(d0)
+                    self.labelsvols.append(l0)
+                if ax0==1:
+                    self.datavols.append(d0.permute(2,0,1)) #unlike tranpose, this gets a different view, so no copy done
+                    self.labelsvols.append(l0.permute(2,0,1))
+                if ax0==2:
+                    self.datavols.append(d0.permute(1,2,0)) #unlike tranpose, this gets a different view, so no copy done
+                    self.labelsvols.append(l0.permute(1,2,0))
+                                           
+        
+        self.tfms=tfms
+        
+        self._idx_cum_sum = np.cumsum(np.array([i.shape[0] for i in self.labelsvols]))
+        self._idx_cum_sum =np.concatenate(([0],self._idx_cum_sum), axis=0) #zslices
+        
+    def __len__(self):
+        return self._idx_cum_sum[-1] #last vlaue of the cumulative sum has the number of indices
+
+    def __getitem__(self, idx):
+        
+        #Check which volume and z coordinate does this index correspond to
+        vol_idx = np.where(np.bitwise_and(self._idx_cum_sum[0:-1]<=idx, self._idx_cum_sum[1:]>idx))[0][0]
+        z_idx = idx-self._idx_cum_sum[vol_idx]
+        
+        #print(f"idx:{idx}, vol_idx:{vol_idx}, z_idx:{z_idx}")
+        
+        data = self.datavols[vol_idx][z_idx,:,:].numpy() #Convert to numpy as data is in torch tensor and albumentations only support numpy
+        labels = self.labelsvols[vol_idx][z_idx,:,:].numpy()
+        
+        #print(f"data shape:{data.shape}, dtype:{dtype}")
+        assert data.shape == labels.shape
+
+        # Apply transforms
+        res =self.tfms(image=data, mask=labels)
+        data=res['image']
+        labels=res['mask']
+        
+        #return a tuple data, mask
+        return data, labels

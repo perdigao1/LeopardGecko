@@ -131,7 +131,7 @@ class cMultiAxisRotationsSegmentor():
 
         self.NN1_pred_settings = SimpleNamespace(**NN1predsettings0)
 
-        #Default setting for NN" MLP classifier
+        #Default setting for NN2 MLP classifier
         #Note that these settings are not saved like the others
         #They are just here if user wants to setup different settings for NN2 before training
         settingsNN2 ={
