@@ -91,7 +91,10 @@ class cSegmentor2_Settings:
     #'lr_reduce_factor': 500,
     
     # Models as a list, maximium 3 items
-    nn1_models_instance_generator = [{
+    # These are settings that are used to create the NN1 model class
+    # This is needed before loading class parameters and running inference.
+    # Loading only works if the model class has been created
+    nn1_models_class_generator = [{
     'class':'smp', #smp: segmentation models pytorch
     'arch': 'U_Net',
     'encoder_name': 'resnet34',
@@ -105,45 +108,185 @@ class cSegmentor2_Settings:
     
     nn1_batch_size=2
 
-    nn2_hidden_layer_sizes = [10,10]
-    nn2_activation = 'tanh'
+    nn2_MLP_models_class_generator = {
+        "nn2_hidden_layer_sizes" : "10,10",
+        "nn2_activation": 'tanh',
+        "nn2_out_nclasses": 2
+    }
 
     #'learning_rate_init':0.001,
     #'solver':'sgd',
     nn2_max_iter = 1000
-
     nn2_ntrain = 262144 #Note that this is not a MLPClassifier parameter
+
+    temp_data_outdir = None
+
+# Define the MLP model
+class MLPClassifier(nn.Module):
+    # Should I add softmax?
+    def __init__(self, input_size:int, hiden_sizes_list:list, output_size:int, activ_str:str):
+        super().__init__()
+
+        size0= input_size
+        self.layers=[]
+        for hls in hiden_sizes_list:
+            hid_layer0 =  nn.Linear(size0, hls)
+            self.layers.append(hid_layer0)
+            size0=hid_layer0
+        #last layer
+        self.layers.append(nn.Linear(size0, output_size))
+
+        if "tanh" in activ_str.lower():
+            self.activ = nn.Tanh()
+        elif "relu" in activ_str.lower():
+            self.activ = nn.ReLU()
+        elif "sigm" in activ_str.lower():
+            self.activ = nn.Sigmoid()
+        else:
+            raise ValueError(f"activ_str {activ_str} not valid")
+
+    def forward(self, x):
+        for hl in self.layers:
+            x= self.activ(hl(x))
+        #x = self.sigm(x)
+        return x
+    
+    def predict_class_as_cpu_np(self,x):
+        p0 = self.forward(x)
+        pred = torch.squeeze(torch.argmax(p0, dim=1))
+        return pred.detach().cpu().numpy()
 
 class cMultiAxisRotationsSegmentor2():
 
-    def __init__(self, temp_data_outdir=None, cuda_device=0):
+    def __init__(self, sett2: cSegmentor2_Settings=None):
+        """
+        Initialise an instance of cMultiAxisRotationsSegmentor2
+        with default settings.
 
+        if sett2 is None, initialises with basic setup
 
-        self.temp_data_outdir=temp_data_outdir
+        If you wish different models for different axis, please use alternative helper creation functions
 
+        """
+        self.settings = sett2
         #self.cuda_device=cuda_device
-        self._init_settings()
-        self.set_cuda_device(cuda_device)
+        if sett2 is None:
+            self.settings = cSegmentor2_Settings()
+
+        self._NN1_models = None
+        self._NN2_model = None
+
+        self.init_models_from_settings()
 
         self.all_nn1_pred_pd=None
+        self._tempdir_pred=None #TODO: Not sure this is needed
 
-        self._tempdir_pred=None
 
-        self._NN1_models=None
-        self._NN2_model=None
+    def init_models_from_settings(self):
+        self._NN1_models = [ self.create_nn1_ptmodel_from_class_generator(x) for x in self.settings.nn1_models_class_generator]
+        self._NN2_model = self.create_nn2_ptmodel_from_class_generator( self.settings.nn2_MLP_models_class_generator )
         
+    @staticmethod
+    def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
+        # get segm model from dictionary item
+        model0=None
 
-    def _init_settings(self):
-        #Initialise internal settings for the neural networks
-        self.settings = cSegmentor2_Settings()
+        if nn1_cls_gen_dict['class'].lower=='smp': #unet, AttentionNet (manet) and fpn
+            #Segmentation models pytorch
+            arch = nn1_cls_gen_dict['arch'].lower()
+            if arch=="unet" or arch=="u_net":
+                NN_class = smp.Unet
+            elif arch=="manet":
+                model0 = smp.MAnet
+            elif arch=="fpn":
+                model0 = smp.FPN
+            else:
+                raise ValueError(f"arch:{arch} not valid.")
+            
+            model0 = NN_class(
+                encoder_name = nn1_cls_gen_dict['encoder_name'],
+                encoder_weights = nn1_cls_gen_dict['encoder_weights'],
+                in_channels = nn1_cls_gen_dict['in_nchannels'],
+                classes = nn1_cls_gen_dict['nclasses'],
+                activation = "sigmoid"
+                )
+        else:
+            raise ValueError(f"class {nn1_cls_gen_dict['class']} not supported.")
+        
+        # TODO: add other 2D model support, not just SMPs
 
+        return model0
+    
+    @staticmethod
+    def create_nn2_ptmodel_from_class_generator(nn2_cls_gen_dict: dict):
+        hid_layers = nn2_cls_gen_dict['nn2_hidden_layer_sizes'].split(",")
+
+        if len(hid_layers)==0:
+            ValueError(f"Invalid nn2_hidden_layer_sizes : {nn2_cls_gen_dict['nn2_hidden_layer_sizes']}")
+
+        hid_layers_num_list = map(int, hid_layers)
+
+        model0 = MLPClassifier(
+            12,
+            hid_layers_num_list,
+            nn2_cls_gen_dict['nn2_out_nclasses'],
+            nn2_cls_gen_dict["nn2_activation"]
+            )
+        
+        return model0
 
     def set_cuda_device(self,n):
-        self._cuda_device=n
+        #self._cuda_device=n
         self.settings.cuda_device=n
 
 
-    
+    @staticmethod
+    def load_from_file(filepath):
+        pass
+        # TODO
+
+
+    @staticmethod
+    def create_simple_separate_models_per_axis(nclasses, cuda_device=0):
+        """
+        Sets up seperate smp unets for each of the axis
+        """
+
+        if nclasses<2:
+            raise ValueError(f"nclasses {nclasses} too small")
+        
+        nn1_dict_gen = {'class':'smp', #smp: segmentation models pytorch
+            'arch': 'U_Net',
+            'encoder_name': 'resnet34',
+            'encoder_weights': 'imagenet', # TODO: support for using existing models (loading)
+            'in_nchannels':1, #greyscale
+            'nclasses':nclasses,
+        }
+
+        sett2 = cSegmentor2_Settings() #get default settings and modify
+
+        sett2.nn1_models_class_generator = [nn1_dict_gen,
+            nn1_dict_gen.copy(),
+            nn1_dict_gen.copy()
+        ]
+
+        sett2.nn1_axes_to_models_indices = [0,1,2]
+
+        sett2.cuda_device = cuda_device #Probably should use kwargs
+
+        #Create instance of cMultiAxisRotationsSegmentor2
+        segm2 = cMultiAxisRotationsSegmentor2(sett2) # will run init()
+
+        return segm2
+
+
+
+
+
+
+
+
+
     def train(self, traindata, trainlabels, get_metrics=True):
         """
         Train NN1 (volume segmantics) and NN2 (MLP Classifier)
@@ -159,12 +302,10 @@ class cMultiAxisRotationsSegmentor2():
         #Check traindata is 3D or list
         if isinstance(traindata, np.ndarray) and isinstance(trainlabels, np.ndarray) :
             logging.info("traindata and trainlabels are ndarray")
-            if traindata.ndim!=3 or trainlabels.ndim!=3:
-                raise ValueError(f"traindata or trainlabels not 3D")
-            else:
-                #Convert to list so that can be used later
-                traindata0 = [traindata]
-                trainlabels0=[trainlabels]
+
+            #Convert to list so that can be used later
+            traindata0 = [traindata]
+            trainlabels0=[trainlabels]
         else:
             if isinstance(traindata, list) and isinstance(trainlabels, list):
                 logging.info("traindata and trainlabels are list")
@@ -173,6 +314,14 @@ class cMultiAxisRotationsSegmentor2():
                 else:
                     traindata0=traindata
                     trainlabels0=trainlabels
+        
+        traindata_ndims = [x.ndim for x in traindata0]
+        trainlabels_ndims = [x.ndim for x in trainlabels0]
+        logging.info(f"traindata_ndims:{traindata_ndims}")
+        logging.info(f"trainlabels_ndims:{trainlabels_ndims}")
+
+        if np.any(traindata_ndims!=3) or np.any(trainlabels_ndims!=3):
+            raise ValueError(f"traindata or trainlabels not 3D")
 
         self.labels_dtype= trainlabels[0].dtype
 
@@ -183,9 +332,6 @@ class cMultiAxisRotationsSegmentor2():
         # ** Train NN1
         self.NN1_train(traindata0, trainlabels0)
         #(This does not return anything.)
-
-
-
 
         # ** Predict NN1
         #Does the multi-axis multi-rotation predictions
@@ -422,48 +568,29 @@ class cMultiAxisRotationsSegmentor2():
 
         nmodels = np.unique(self.settings.nn1_axes_to_models_indices)
         logging.info(f"nmodels:{nmodels}")
+        
+        #Check there are enough "generators"
+        if len(self.settings.nn1_models_class_generator)!=nmodels:
+            ValueError(f"Number of nn1_models_class_generator {self.settings.nn1_models_class_generator} is different from nmodels {nmodels}")
 
-        def get_model_from_dict(dict0):
-            # get segm model from dictionary item
-            model0=None
 
-            if dict0['class'].lower=='smp': #unet, AttentionNet (manet) and fpn
-                #Segmentation models pytorch
-                arch = dict0['arch'].lower()
-                if arch=="unet" or arch=="u_net":
-                    NN_class = smp.Unet
-                elif arch=="manet":
-                    model0 = smp.MAnet
-                elif arch=="fpn":
-                    model0 = smp.FPN
-                else:
-                    raise ValueError(f"arch:{arch} not valid.")
-                
-                model0 = NN_class(
-                    encoder_name = dict0['encoder_name'],
-                    encoder_weights = dict0['encoder_weights'],
-                    in_channels = dict0['in_nchannels'],
-                    classes = dict0['nclasses'],
-                    activation = "sigmoid"
-                    )
-            else:
-                raise ValueError(f"class {dict0['class']} not supported.")
-            
-            return model0
-
-        firstmodel = get_model_from_dict(self.settings.nn1_models_instance_generator[0])
+        firstmodel = self.create_nn1_ptmodel_from_class_generator(self.settings.nn1_models_class_generator[0])
         _ = firstmodel.to(self.settings.cuda_device)
 
         self._NN1_models.append(firstmodel)
 
+        # If more than one model is used, create other models with the same class
+        # TODO: nn1_models_class_generator is a list
+        # Create a separate model for each generator
+
         if nmodels>1:
             for imodel in range(1,nmodels):
                 model1=None
-                if imodel>=len(self.settings.nn1_models_instance_generator):
+                if imodel>=len(self.settings.nn1_models_class_generator):
                     #use the first model type as reference to generate next
-                    model1 = self.settings.nn1_models_instance_generator[0]
+                    model1 = self.settings.nn1_models_class_generator[0]
                 else:
-                    model1 = self.settings.nn1_models_instance_generator[imodel]
+                    model1 = self.settings.nn1_models_class_generator[imodel]
                 _ = model1.to(self.settings.cuda_device)
                 self._NN1_models.append(model1)
 
