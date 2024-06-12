@@ -41,6 +41,7 @@ import tempfile
 import logging
 from types import SimpleNamespace
 import tqdm #progress bar in iterations
+import utils
 
 #from . import metrics
 #from .utils import *
@@ -54,6 +55,7 @@ import albumentations as alb
 import albumentations.pytorch
 
 import segmentation_models_pytorch as smp
+import segmentation_models_pytorch.utils
 
 class cSegmentor2_Settings:
     """
@@ -89,6 +91,13 @@ class cSegmentor2_Settings:
     #'end_lr': 50,
     #'lr_find_epochs': 1,
     #'lr_reduce_factor': 500,
+
+    nn1_lr=1e-5
+    nn1_max_lr=1e-2
+    nn1_epochs = 30
+
+    nn1_batch_size = 2
+    nn1_num_workers = 2
     
     # Models as a list, maximium 3 items
     # These are settings that are used to create the NN1 model class
@@ -280,13 +289,6 @@ class cMultiAxisRotationsSegmentor2():
         return segm2
 
 
-
-
-
-
-
-
-
     def train(self, traindata, trainlabels, get_metrics=True):
         """
         Train NN1 (volume segmantics) and NN2 (MLP Classifier)
@@ -299,6 +301,7 @@ class cMultiAxisRotationsSegmentor2():
         logging.debug(f"train()")
         trainlabels0 = None
         traindata0=None
+
         #Check traindata is 3D or list
         if isinstance(traindata, np.ndarray) and isinstance(trainlabels, np.ndarray) :
             logging.info("traindata and trainlabels are ndarray")
@@ -311,10 +314,11 @@ class cMultiAxisRotationsSegmentor2():
                 logging.info("traindata and trainlabels are list")
                 if len(traindata)!=len(trainlabels):
                     raise ValueError("len(traindata)!=len(trainlabels) error. Must be the same number of items.")
-                else:
-                    traindata0=traindata
-                    trainlabels0=trainlabels
+                
+                traindata0=traindata
+                trainlabels0=trainlabels
         
+        #Check dimensions of volumes
         traindata_ndims = [x.ndim for x in traindata0]
         trainlabels_ndims = [x.ndim for x in trainlabels0]
         logging.info(f"traindata_ndims:{traindata_ndims}")
@@ -329,9 +333,13 @@ class cMultiAxisRotationsSegmentor2():
         nsets=len(traindata0)
         logging.info(f"nsets:{nsets}")
 
+
         # ** Train NN1
         self.NN1_train(traindata0, trainlabels0)
         #(This does not return anything.)
+
+
+        #TODO *******
 
         # ** Predict NN1
         #Does the multi-axis multi-rotation predictions
@@ -489,114 +497,13 @@ class cMultiAxisRotationsSegmentor2():
 
         if not(isinstance(traindata_list, list) and isinstance(trainlabels_list, list) ):
             raise ValueError("Invalid traindata_list or trainlabels_list")
-        
-        # tempdir_data=None
-        # tempdir_seg=None
-        # if self.temp_data_outdir is None:
-        #     tempdir_data = tempfile.TemporaryDirectory()
-        #     tempdir_data_path=Path(tempdir_data.name)
-
-        #     tempdir_seg = tempfile.TemporaryDirectory()
-        #     tempdir_seg_path = Path(tempdir_seg.name)
-
-        #     # tempdir_pred= tempfile.TemporaryDirectory()
-        #     # tempdir_pred_path = Path(tempdir_pred.name)
-        # else:
-        #     tempdir_data_path=Path(self.temp_data_outdir,"NN1_data")
-        #     tempdir_data_path.mkdir(exist_ok=True)
-        #     tempdir_seg_path=Path(self.temp_data_outdir, "NN1_seg")
-        #     tempdir_seg_path.mkdir(exist_ok=True)
-
-        # # tempdir_data = tempfile.TemporaryDirectory()
-        # # tempdir_data_path=Path(tempdir_data.name)
-        # logging.info(f"tempdir_data_path:{tempdir_data_path}")
-
-        # # tempdir_seg = tempfile.TemporaryDirectory()
-        # # tempdir_seg_path = Path(tempdir_seg.name)
-        # logging.info(f"tempdir_seg_path:{tempdir_seg_path}")
-
-        # Keep track of the number of labels
-        max_label_no = 0
-        label_codes = None
-
-        # # Set up the DataSlicer and slice the data volumes into image files
-        # for count , (traindata0, trainlabels0) in enumerate(zip(traindata_list, trainlabels_list)):
-        #     slicer = TrainingDataSlicer(traindata0, trainlabels0, self.NN1_train_settings)
-        #     data_prefix, label_prefix = f"data{count}", f"seg{count}"
-        #     slicer.output_data_slices(tempdir_data_path, data_prefix)
-        #     slicer.output_label_slices(tempdir_seg_path, label_prefix)
-        #     if slicer.num_seg_classes > max_label_no:
-        #         max_label_no = slicer.num_seg_classes
-        #         label_codes = slicer.codes
-
-        # # Set up the 2dTrainer
-        # self.trainer = VolSeg2dTrainer(tempdir_data_path, tempdir_seg_path, max_label_no, self.NN1_train_settings)
-        
-        # # Train the model, first frozen, then unfrozen
-        # num_cyc_frozen = self.NN1_train_settings.num_cyc_frozen
-        # num_cyc_unfrozen = self.NN1_train_settings.num_cyc_unfrozen
-        # #model_type = settings.model["type"].name
-
-        # if num_cyc_frozen > 0:
-        #     self.trainer.train_model(
-        #         self.model_NN1_path, num_cyc_frozen, self.NN1_train_settings.patience, create=True, frozen=True
-        #     )
-        # if num_cyc_unfrozen > 0 and num_cyc_frozen > 0:
-        #     self.trainer.train_model(
-        #         self.model_NN1_path, num_cyc_unfrozen, self.NN1_train_settings.patience, create=False, frozen=False
-        #     )
-        # elif num_cyc_unfrozen > 0 and num_cyc_frozen == 0:
-        #     self.trainer.train_model(
-        #         self.model_NN1_path, num_cyc_unfrozen, self.NN1_train_settings.patience, create=True, frozen=False
-        #     )
-
-        # # Clean up all the saved slices
-        # slicer.clean_up_slices()
-
-        # if not tempdir_data is None:
-        #     logging.info("tempdir_data and tempdir_seg cleanup.")
-        #     tempdir_data.cleanup()
-        #     tempdir_seg.cleanup()
-
-
-
-        # TODO: Prepare training of model(s)
-        # Create DataLoader, along different axis
-        # Create models (or load models)
-        # Run training loop
-
 
         nmodels = np.unique(self.settings.nn1_axes_to_models_indices)
         logging.info(f"nmodels:{nmodels}")
         
-        #Check there are enough "generators"
-        if len(self.settings.nn1_models_class_generator)!=nmodels:
-            ValueError(f"Number of nn1_models_class_generator {self.settings.nn1_models_class_generator} is different from nmodels {nmodels}")
 
-
-        firstmodel = self.create_nn1_ptmodel_from_class_generator(self.settings.nn1_models_class_generator[0])
-        _ = firstmodel.to(self.settings.cuda_device)
-
-        self._NN1_models.append(firstmodel)
-
-        # If more than one model is used, create other models with the same class
-        # TODO: nn1_models_class_generator is a list
-        # Create a separate model for each generator
-
-        if nmodels>1:
-            for imodel in range(1,nmodels):
-                model1=None
-                if imodel>=len(self.settings.nn1_models_class_generator):
-                    #use the first model type as reference to generate next
-                    model1 = self.settings.nn1_models_class_generator[0]
-                else:
-                    model1 = self.settings.nn1_models_class_generator[imodel]
-                _ = model1.to(self.settings.cuda_device)
-                self._NN1_models.append(model1)
-
-        logging.info(f"Created {len(self._NN1_models)} models for axes z,y,x with order {self.settings.nn1_axes_to_models_indices}.")
-
-
+        # Setup augmentations to apply to 2D images
+        logging.info("Setting up augmentations")
         tfms0 =alb.Compose(
             [
             # Images can have different sizes, so don't use fixed target size, replace with CropAndPad
@@ -626,14 +533,13 @@ class cMultiAxisRotationsSegmentor2():
             ]
         )
 
-
-        if not self.NN1_train_settings.data_vol_norm_process is None:
-
+        logging.info("Preprocess volume according to data_vol_norm_process")
+        if not self.settings.data_vol_norm_process is None:
 
             #Normalise volumetric data to setting chosen
             traindata_list0=[]
 
-            if "mean_stdev_3" in self.NN1_train_settings.data_vol_norm_process:
+            if "mean_stdev_3" in self.settings.data_vol_norm_process:
                 # Clip data to -3*stdev and +3*stdev and normalises to values between 0 and 1
                 for d0 in traindata_list:
                     d0_mean = np.mean(d0)
@@ -647,7 +553,7 @@ class cMultiAxisRotationsSegmentor2():
 
                     traindata_list0.append(d0_corr)
 
-            elif "mean_stdev_3_5" in self.NN1_train_settings.data_vol_norm_process:
+            elif "mean_stdev_3_5" in self.settings.data_vol_norm_process:
                 for d0 in traindata_list:
                     d0_mean = np.mean(d0)
                     d0_std = np.std(d0)
@@ -667,8 +573,9 @@ class cMultiAxisRotationsSegmentor2():
         logging.info("Creating train and validation dataloaders for each model")
         # Dataloader(s) will depend on the number of models and respective axes
         dataloaders_train=[]
-        dataloaders_valid=[]
+        dataloaders_test=[]
         for i in range(nmodels):
+            #Gets the axes that the NN1 model is supposed to be used
             model_axes= np.flatnonzero(
                 np.array(self.settings.nn1_axes_to_models_indices) == i
             ).tolist()
@@ -684,20 +591,65 @@ class cMultiAxisRotationsSegmentor2():
             dl_test = DataLoader(dset2, batch_size=self.settings.nn1_batch_size)
 
             dataloaders_train.append(dl_train)
-            dataloaders_valid.append(dl_test)
+            dataloaders_test.append(dl_test)
 
-            logging.info(f"model {i}, len(dataloaders_train): {len(dataloaders_train)}, len(dataloaders_valid): {len(dataloaders_valid)}")
+            logging.info(f"Train and test dataloaders created for model number:{i}, model_axes:{model_axes}")
 
-        logging.info("Dataloaders created.")
+        logging.info("All dataloaders created.")
         logging.info(f"len(dataloaders_train): {len(dataloaders_train)}")
-        logging.info(f"len(dataloaders_train): {len(dataloaders_train)}")
+        logging.info(f"len(dataloaders_test): {len(dataloaders_test)}")
 
         
-        #TODO
-        # Setup losses and optimizers
+        # Setup losses
+        # Note that output from SMP is already sigmoided, hence the 'logits' versions of losses are not used
+        nn1_loss_func = None
+        if "celoss" in self.settings.nn1_loss_criterion.lower():
+            nn1_loss_func = torch.nn.CrossEntropyLoss().to('cuda')
+        elif "diceloss" in self.settings.nn1_loss_criterion.lower():
+            nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=False).to('cuda')
+        else:
+            raise ValueError(f"{self.settings.nn1_loss_criterion} not a valid loss criteria")
+        
+        # Setup metrics for test data
+        # TODO
+        nn1_metric_func = None
+        if "meaniou" in self.settings.nn1_eval_metric.lower():
+            nn1_metric_func = segmentation_models_pytorch.utils.metrics.IoU()
+        elif "dice" in self.settings.nn1_eval_metric.lower() or "fscore" in self.settings.nn1_eval_metric.lower():
+            nn1_metric_func = segmentation_models_pytorch.utils.metrics.Fscore()
+        elif "accuracy" in self.settings.nn1_eval_metric.lower():
+            nn1_metric_func = segmentation_models_pytorch.utils.metrics.Accuracy()
 
 
+        #Train each model
+        for i,model0 in enumerate(self._NN1_models):
+            # get respective dataloader
+            dl_train0 = dataloaders_train[i]
+            dl_test0 = dataloaders_test[i]
 
+            #Setup optimizer and scaler
+
+            optimizer = torch.optim.AdamW(model0.parameters(), lr=self.settings.nn1_lr)
+            scaler=torch.cuda.amp.GradScaler()
+
+            epochs = self.settings.nn1_epochs
+
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr= self.settings.nn1_max_lr,
+                steps_per_epoch=len(dl_train0),
+                epochs=epochs,
+                #pct_start=0.1, #default=0.3
+                )
+            
+            train_model(model0, dl_train0, dl_test0, nn1_loss_func, optimizer, scaler, scheduler,
+                        epochs=epochs,
+                        metric_fn=nn1_metric_func
+                        )
+
+            logging.info(f"Training model {i} complete")
+
+        logging.info("All models trained successfully. Don't forget to save them.")
 
 
 
@@ -729,82 +681,16 @@ class cMultiAxisRotationsSegmentor2():
 
         """
 
-        #Load volume segmantics model from file to class instance
-        #self.volseg2pred = VolSeg2dPredictor(self.model_NN1_path, self.NN1_pred_settings, use_dask=True)
-        #Using this VolSeg2dPredictor will not clip data
-        #Also moved this functionality to later
-
-        # For volumesegmantics standard predictions if set
-        self.labels_vs_2stack = None
-        self.probs_vs_2stack = None
-
-        from . import ConsistencyScore
-        # For consistency score determination from predictions if set
-        consistencyscore0 = ConsistencyScore.cConsistencyScoreMultipleWayProbsAccumulate()
-
-
-
-
-        logging.debug("NN1_predict()")
+        logging.info("NN1_predict()")
         #Internal functions
         def _save_pred_data(data, count,axis, rot):
             # Saves predicted data to h5 file in tempdir and return file path in case it is needed
             file_path = f"{pred_folder_out}/pred_{count}_{axis}_{rot}.h5"
             
-            save_data_to_hdf5(data, file_path)
+            utils.save_data_to_hdf5(data, file_path)
             return file_path
-        
-        # def _handle_pred_data_probs(self,pred_probs, pred_labels, count,axis,rot):
-        #     #nonlocal attempts to grab these variables defined in previous scope
-        #     # Another way to handle this is to define variable with self.
-        #     # nonlocal labels_vs
-        #     # nonlocal probs_vs
-            
-        #     # pred_probs is in format (z,y,x, class)
-        #     # pred_labels is in format (z,y,x)
 
-        #     #Accumulate for consistency score
-        #     logging.debug(f"_handle_pred_data_probs(), count,axis,rot:{count},{axis},{rot}, self.NN1_consistencyscore_outpath:{self.NN1_consistencyscore_outpath}, self.NN1_volsegm_pred_path:{self.NN1_volsegm_pred_path}")
-            
-        #     if not self.NN1_consistencyscore_outpath is None:
-        #         consistencyscore0.accumulate(pred_probs)
-
-        #     # Accumulate for volume segmantics
-        #     if not self.NN1_volsegm_pred_path is None:
-        #         logging.debug("Calculating probs_class_squeezed")
-        #         # # Squeeze probabilities along class
-        #         # # by grabing the highest probable class label and probability
-        #         # max_prob_idx = np.argmax(pred_probs, axis=1, keepdims=True)
-        #         # # Extract along axis from outputs
-        #         # probs_class_squeezed = np.take(pred_probs, axis=1, indices=max_prob_idx) #(data,indices, axis)
-        #         # # Remove the label dimension
-        #         # probs_class_squeezed = np.squeeze(probs_class_squeezed, axis=1)
-
-        #         # max_prob_idx = torch.argmax(probs, dim=1, keepdim=True)
-        #         # # Extract along axis from outputs
-        #         # probs = torch.gather(probs, 1, max_prob_idx)  #(data,dim, index)
-        #         # # Remove the label dimension
-        #         # probs = torch.squeeze(probs, dim=1)
-
-        #         probs_class_squeezed = np.max(pred_probs, axis=pred_probs.ndim-1)
-
-        #         if self.labels_vs_2stack is None:
-        #             logging.info(f"self.NN1_volsegm_pred_path provided:{self.NN1_volsegm_pred_path}. Will merge and save to predicted labels using volumesegmantics method.")
-        #             logging.debug("First labels and probs file initializes")
-        #             shape_tup = pred_labels.shape
-        #             self.labels_vs_2stack = np.empty((2, *shape_tup), dtype=pred_labels.dtype)
-        #             self.probs_vs_2stack = np.empty((2, *shape_tup), dtype=pred_probs.dtype)
-        #             self.labels_vs_2stack[0]=pred_labels
-        #             self.probs_vs_2stack[0]=probs_class_squeezed
-        #         else:
-        #             self.labels_vs_2stack[1]=pred_labels
-        #             self.probs_vs_2stack[1]=probs_class_squeezed
-
-        #             self._squeeze_merge_vols_by_max_prob(self.probs_vs_2stack,self.labels_vs_2stack)
-
-        #     #Save and return the result (filepath) from _save_pred_data() function 
-        #     return _save_pred_data(pred_probs, count,axis,rot)
-
+        # Ensure data_to_predict_l is a list of datasets
         data_to_predict_l=None
         if not isinstance(data_to_predict, list):
             logging.debug("data_to_predict not a list. Converting to list")
@@ -823,58 +709,47 @@ class cMultiAxisRotationsSegmentor2():
 
         logging.info(f"number of data sets to predict: {len(data_to_predict_l)}")
         
-        for i, data_to_predict0 in enumerate(data_to_predict_l):
-            logging.info(f"Data to predict index:{i}")
-            data_vol1 = np.array(data_to_predict0) #Copies
+        for iset, data_to_predict0 in enumerate(data_to_predict_l):
+            logging.info(f"Data to predict index:{iset}")
+            data_vol0 = np.array(data_to_predict0) #Copies
 
             #setup Prediction Manager
             #It will also clip data depending on settings, and to get that data
             # it is property data_vol
-            volseg2pred_m = VolSeg2DPredictionManager(
-                model_file_path= self.model_NN1_path,
-                data_vol=data_vol1,
-                settings=self.NN1_pred_settings,
-                #use_dask=True
-                )
+            # volseg2pred_m = VolSeg2DPredictionManager(
+            #     model_file_path= self.model_NN1_path,
+            #     data_vol=data_vol1,
+            #     settings=self.NN1_pred_settings,
+            #     #use_dask=True
+            #     )
 
-            data_vol0 = volseg2pred_m.data_vol  #Collects clipped data
+            #Create dataloaders along different axis for this specific data_to_predict0
+            # Input_dataset_along_axes
 
             itag=0
-
-            # reinitialise
-            self.labels_vs_2stack = None 
-            self.probs_vs_2stack = None
-            consistencyscore0.clear()
 
             for krot in range(0, 4):
                 rot_angle_degrees = krot * 90
                 logging.info(f"Volume to be rotated by {rot_angle_degrees} degrees")
 
                 #Predict 3 axis
-                #YX
+                #YX, along Z
                 planeYX=(1,2)
-                logging.info("Predicting YX slices:")
+                logging.info("Predicting YX slices, along Z")
                 data_vol = np.rot90(np.array(data_vol0),krot, axes=planeYX) #rotate
-                #returns (labels,probabilities)
-                res = volseg2pred_m.predictor._predict_single_axis_all_probs(
-                    data_vol,
-                    axis=Axis.Z
-                )
-                pred_probs = np.rot90(res[1], -krot, axes=planeYX) #invert rotation before saving
+
+                res = self.nn1_predict_slices_along_axis(data_vol, axis=0)
+
+                #invert rotations before saving
+                pred_probs = np.rot90(res[1], -krot, axes=planeYX) 
                 pred_labels = np.rot90(res[0], -krot, axes=planeYX)
-                fn = _save_pred_data(pred_probs, i, "YX", rot_angle_degrees)
-                #fn = _handle_pred_data_probs(self,pred_probs,pred_labels, i, "YX", rot_angle_degrees)
 
-                #Saves prediction labels
-                #Sets nlabels from last dimension. Assumes last dimension is number of labels
-                #Used to chunk data when saving
-                self.nlabels=pred_probs.shape[-1]
-                pred_data_probs_filenames.append(fn)
+                fn = _save_pred_data(pred_probs, iset, "YX", rot_angle_degrees)
+                fn = _save_pred_data(pred_labels, iset, "YX_labels", rot_angle_degrees)
 
-                fn = _save_pred_data(pred_labels, i, "YX_labels", rot_angle_degrees)
                 pred_data_labels_filenames.append(fn)
-
-                pred_sets.append(i)
+                pred_data_probs_filenames.append(fn)
+                pred_sets.append(iset)
                 pred_planes.append("YX")
                 pred_rots.append(rot_angle_degrees)
                 pred_ipred.append(itag)
@@ -883,22 +758,21 @@ class cMultiAxisRotationsSegmentor2():
 
                 
                 #ZX
-                logging.info("Predicting ZX slices:")
+                logging.info("Predicting ZX slices, along Y")
                 planeZX=(0,2)
                 data_vol = np.rot90(np.array(data_vol0),krot, axes=planeZX) #rotate
-                res = volseg2pred_m.predictor._predict_single_axis_all_probs(
-                    data_vol, axis=Axis.Y
-                )
+                
+                res = self.nn1_predict_slices_along_axis(data_vol, axis=1)
+
                 pred_probs = np.rot90(res[1], -krot, axes=planeZX) #invert rotation before saving
                 pred_labels = np.rot90(res[0], -krot, axes=planeZX)
-                fn = _save_pred_data(pred_probs, i, "ZX", rot_angle_degrees)
-                #fn = _handle_pred_data_probs(self,pred_probs,pred_labels, i, "ZX", rot_angle_degrees)
-                pred_data_probs_filenames.append(fn)
 
-                fn = _save_pred_data(pred_labels, i, "ZX_labels", rot_angle_degrees)
+                fn = _save_pred_data(pred_probs, iset, "ZX", rot_angle_degrees)
+                fn = _save_pred_data(pred_labels, iset, "ZX_labels", rot_angle_degrees)
+
                 pred_data_labels_filenames.append(fn)
-
-                pred_sets.append(i)
+                pred_data_probs_filenames.append(fn)
+                pred_sets.append(iset)
                 pred_planes.append("ZX")
                 pred_rots.append(rot_angle_degrees)
                 pred_ipred.append(itag)
@@ -906,32 +780,29 @@ class cMultiAxisRotationsSegmentor2():
                 itag+=1
 
                 #ZY
-                logging.info("Predicting ZY slices:")
+                logging.info("Predicting ZY slices, along X")
                 planeZY=(0,1)
                 data_vol = np.rot90(np.array(data_vol0),krot, axes=planeZY) #rotate
-                res= volseg2pred_m.predictor._predict_single_axis_all_probs(
-                    data_vol, axis=Axis.X
-                )
+                
+                res = self.nn1_predict_slices_along_axis(data_vol, axis=2)
+
                 pred_probs = np.rot90(res[1], -krot, axes=planeZY) #invert rotation before saving
                 pred_labels = np.rot90(res[0], -krot, axes=planeZY)
-                fn = _save_pred_data(pred_probs, i, "ZY", rot_angle_degrees)
-                #fn = _handle_pred_data_probs(self,pred_probs,pred_labels, i, "ZY", rot_angle_degrees)
-                pred_data_probs_filenames.append(fn)
+                fn = _save_pred_data(pred_probs, iset, "ZY", rot_angle_degrees)
+                fn = _save_pred_data(pred_labels, iset, "ZY_labels", rot_angle_degrees)
 
-                pred_labels = np.rot90(res[0], -krot, axes=planeZY)
-                fn = _save_pred_data(pred_labels, i, "ZY_labels", rot_angle_degrees)
                 pred_data_labels_filenames.append(fn)
-
-                pred_sets.append(i)
+                pred_data_probs_filenames.append(fn)
+                pred_sets.append(iset)
                 pred_planes.append("ZY")
                 pred_rots.append(rot_angle_degrees)
                 pred_ipred.append(itag)
                 pred_shapes.append(pred_labels.shape)
                 itag+=1
 
-            del(data_vol)
+            del(data_vol0)
 
-        logging.debug("Generating a DataFrame object with information about predictions")
+        logging.info("Generating a DataFrame object with information about predictions")
 
         all_pred_pd = pd.DataFrame({
             'pred_data_probs_filenames': pred_data_probs_filenames,
@@ -943,23 +814,8 @@ class cMultiAxisRotationsSegmentor2():
             'pred_shapes': pred_shapes,
         })
         
-        # #This code below is untested
-        # #Run standard volume segmantics merging of predicted volumes and saves as h5 file
-        # if not self.NN1_volsegm_pred_path is None:
-        #     logging.info(f"volsegm_pred_path provided:{self.NN1_volsegm_pred_path}, saving merged prediction labels")
+        logging.info("NN1_predict() complete")
 
-        #     #Upon completion, save labels
-        #     save_data_to_hdf5(self.labels_vs_2stack[0],self.NN1_volsegm_pred_path)
-
-        # #Get the final consistency score
-        # if not self.NN1_consistencyscore_outpath is None:
-        #     save_data_to_hdf5(consistencyscore0.getCScore(),self.NN1_consistencyscore_outpath)
-
-        #Clean up
-        del(self.labels_vs_2stack)
-        del(self.probs_vs_2stack)
-
-        #return pred_data_probs_filenames, pred_data_labels_filenames
         return all_pred_pd
 
 
@@ -1034,16 +890,7 @@ class cMultiAxisRotationsSegmentor2():
         #self.NN2 = MLPClassifier(hidden_layer_sizes=(10,10), random_state=1, activation='tanh', verbose=True, learning_rate_init=0.001,solver='sgd', max_iter=1000)
         #self.NN2 = MLPClassifier(**self.NN2_settings.__dict__) #Unpack dict to become parameters
 
-        self.NN2 = MLPClassifier(
-            hidden_layer_sizes=self.NN2_settings.hidden_layer_sizes,
-            activation=self.NN2_settings.activation,
-            random_state=self.NN2_settings.random_state,
-            verbose=self.NN2_settings.verbose,
-            learning_rate_init=self.NN2_settings.learning_rate_init,
-            solver=self.NN2_settings.solver,
-            max_iter=self.NN2_settings.max_iter
-            )
-
+        # TODO: torch based MLP
         # self.NN2 = MLPClassifier(
         #     hidden_layer_sizes=self.NN2_settings.hidden_layer_sizes,
         #     activation=self.NN2_settings.activation,
@@ -1051,13 +898,13 @@ class cMultiAxisRotationsSegmentor2():
         #     verbose=self.NN2_settings.verbose,
         #     learning_rate_init=self.NN2_settings.learning_rate_init,
         #     solver=self.NN2_settings.solver,
-        #     max_iter=self.NN2_settings.max_iter,
-        #     loss= self.dice_loss_np #chatgpt advise, but was wrong, sklearn MLP does not support costum loss functions
+        #     max_iter=self.NN2_settings.max_iter
         #     )
+        # #Do the training here
+        # logging.info(f"NN2 MLPClassifier fit with {len(X_train)} samples, (y_train {len(Y_train)} samples)")
+        # self.NN2.fit(X_train,Y_train)
+
         
-        #Do the training here
-        logging.info(f"NN2 MLPClassifier fit with {len(X_train)} samples, (y_train {len(Y_train)} samples)")
-        self.NN2.fit(X_train,Y_train)
 
         logging.info(f"NN2 train score:{self.NN2.score(X_train,Y_train)}")
 
@@ -1470,6 +1317,30 @@ class cMultiAxisRotationsSegmentor2():
         #Required to run with `with`
         return self
 
+    def nn1_predict_slices_along_axis(self, datavol, axis):
+        ds0 = VolumeSlicerDataset(datavol, axis , per_slice_tfms=None) #TODO: check per_slice_tfms
+        dl0 = DataLoader(ds0, self.settings.nn1_batch_size, self.settings.nn1_num_workers)
+
+        # Get correct model
+        model_index = self.settings.nn1_axes_to_models_indices[axis]
+        model = self._NN1_models[model_index]
+        preds_list = []
+        labels_list = []
+        for x in dl0:
+            X=X_parse(x)
+            #y=y_parse(y)
+            pred_probs_slice = model(X)
+            preds_list.append(pred_probs_slice)
+
+            # get labels using argmax
+            lbl_slice = torch.argmax(pred_probs_slice, dim=1)
+            labels_list.append(lbl_slice)
+
+        preds = torch.cat(preds_list, dim=axis)
+        labels = torch.cat(labels_list, dim=axis)
+
+        return labels,preds
+
 
 class Input_dataset_along_axes(Dataset):
     def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2], tfms=None, preprocess=None):
@@ -1522,3 +1393,114 @@ class Input_dataset_along_axes(Dataset):
         
         #return a tuple data, mask
         return data, labels
+
+class VolumeSlicerDataset(Dataset):
+
+    def __init__(self, datavol, axis, per_slice_tfms=None):
+        assert datavol.ndim==3
+        assert axis==0 or axis==1 or axis==2
+
+        self.datavol=datavol
+        self.axis=axis
+        self.per_slice_tfms=per_slice_tfms
+
+    def __len__(self):
+        return self.datavol.shape[self.axis]
+
+    def __getitem__(self, idx):
+        
+        data_slice=None
+        if self.axis==0:
+            data_slice = self.datavol[idx,:,:]
+        elif self.axis==1:
+            data_slice = self.datavol[0,idx,:]
+        elif self.axis==2:
+            data_slice = self.datavol[0,:,idx]
+
+        data_sl_np = data_slice.numpy() #Convert to numpy as data is in torch tensor and albumentations only support numpy
+
+        # Apply transforms
+        res=data_sl_np
+        if self.per_slice_tfms is not None:
+            res = self.per_slice_tfms(data_sl_np)
+
+        return res
+
+def X_parse(X):
+    return X.to('cuda')
+
+def y_parse(y):
+    return torch.unsqueeze(y.to('cuda'),dim=1).float()
+
+def train_loop(dataloader, model, loss_fn, optimizer, scaler, scheduler, do_log=True):
+    size = len(dataloader.dataset)
+    # Set the model to training mode - important for batch normalization and dropout layers
+    # Unnecessary in this situation but added for best practices
+    model.train()
+    for batch, (X, y) in enumerate(dataloader):
+        X=X_parse(X)
+        # Compute prediction and loss
+        pred = model(X) #returns shape(8,1,512,512)
+
+        loss = loss_fn(pred, y)
+
+        # Backpropagation
+        #loss.backward()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        #optimizer.step() #step done by the scheduler
+        optimizer.zero_grad()
+
+        scheduler.step()
+
+        if do_log and batch % 100 == 0:
+            loss, current = loss.item(), (batch + 1) * len(X)
+            logging.info(f"batch:{batch}  loss: {loss:>7f}  [{current:>5d}/{size:>5d}]. lr:{scheduler.get_last_lr()}")
+
+def test_loop(dataloader, model, loss_fn, metric_fn=None):
+    # Set the model to evaluation mode - important for batch normalization and dropout layers
+    # Unnecessary in this situation but added for best practices
+    model.eval()
+    #size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+
+    test_losses=[]
+    metrics=[]
+
+    # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
+    # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
+    with torch.no_grad():
+        for X, y in dataloader:
+            X=X_parse(X)
+            #y=y_parse(y)
+            pred = model(X)
+            test_loss = loss_fn(pred, y).item()
+            test_losses.append(test_loss)
+
+            if not metric_fn is None:
+                pred_argmax = torch.argmax(pred, dim=1)
+                metric = metric_fn(pred_argmax, y).item()
+                metrics.append(metric)
+            # #metric
+            # correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+
+    avg_loss = np.mean(np.array(test_loss))
+    logging.info(f"Avg loss: {avg_loss:>8f}")
+
+    avg_metric=None
+    if not metric_fn is None:
+        avg_metric = np.mean(np.array(metrics))
+        logging.info(f"Avg metric: {avg_metric:>8f}")
+
+    return {"avg_loss":avg_loss, "avg_metric":avg_metric}
+
+def train_model(model0, dl_train, dl_test, loss_fn, optimizer, scaler, scheduler, epochs, metric_fn=None):
+    epoch_test_losses=[]
+    for t in range(epochs):
+        logging.info(f"---- Epoch {t+1}/{epochs} ----")
+        train_loop(dl_train, model0, loss_fn, optimizer, scaler, scheduler)
+        test_res= test_loop(dl_test, model0, loss_fn, metric_fn=metric_fn)
+        epoch_test_losses.append(test_res["avg_loss"])
+    logging.info(f"Done! Final loss is : {test_res['avg_loss']}, and metric is: {test_res['avg_metric']}")
