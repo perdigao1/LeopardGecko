@@ -41,7 +41,7 @@ import tempfile
 import logging
 from types import SimpleNamespace
 import tqdm #progress bar in iterations
-import utils
+from . import utils
 
 #from . import metrics
 #from .utils import *
@@ -96,7 +96,7 @@ class cSegmentor2_Settings:
     nn1_max_lr=1e-2
     nn1_epochs = 30
 
-    nn1_batch_size = 2
+    nn1_batch_size = 3
     nn1_num_workers = 2
     
     # Models as a list, maximium 3 items
@@ -109,13 +109,11 @@ class cSegmentor2_Settings:
     'encoder_name': 'resnet34',
     'encoder_weights': 'imagenet', # TODO: support for using existing models (loading)
     'in_nchannels':1,
-    'nclasses':1,
+    'nclasses':2,
     }]
 
     nn1_axes_to_models_indices = [0,0,0] # By default use the same model for all axes
     # To use different models, use [0,1,2] for model0 along z, model1 along y, and model2 along x
-    
-    nn1_batch_size=2
 
     nn2_MLP_models_class_generator = {
         "nn2_hidden_layer_sizes" : "10,10",
@@ -141,7 +139,7 @@ class MLPClassifier(nn.Module):
         for hls in hiden_sizes_list:
             hid_layer0 =  nn.Linear(size0, hls)
             self.layers.append(hid_layer0)
-            size0=hid_layer0
+            size0=hls
         #last layer
         self.layers.append(nn.Linear(size0, output_size))
 
@@ -192,15 +190,15 @@ class cMultiAxisRotationsSegmentor2():
 
 
     def init_models_from_settings(self):
-        self._NN1_models = [ self.create_nn1_ptmodel_from_class_generator(x) for x in self.settings.nn1_models_class_generator]
-        self._NN2_model = self.create_nn2_ptmodel_from_class_generator( self.settings.nn2_MLP_models_class_generator )
+        self._NN1_models = [ self.create_nn1_ptmodel_from_class_generator(x).to(f"cuda:{self.settings.cuda_device}") for x in self.settings.nn1_models_class_generator]
+        self._NN2_model = self.create_nn2_ptmodel_from_class_generator( self.settings.nn2_MLP_models_class_generator.to(f"cuda:{self.settings.cuda_device}") )
         
     @staticmethod
     def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
         # get segm model from dictionary item
         model0=None
 
-        if nn1_cls_gen_dict['class'].lower=='smp': #unet, AttentionNet (manet) and fpn
+        if nn1_cls_gen_dict['class'].lower()=='smp': #unet, AttentionNet (manet) and fpn
             #Segmentation models pytorch
             arch = nn1_cls_gen_dict['arch'].lower()
             if arch=="unet" or arch=="u_net":
@@ -272,6 +270,13 @@ class cMultiAxisRotationsSegmentor2():
             'nclasses':nclasses,
         }
 
+        nn2_MLP_models_class_generator = {
+            "nn2_hidden_layer_sizes" : "10,10",
+            "nn2_activation": 'tanh',
+            "nn2_out_nclasses": nclasses
+        }
+
+
         sett2 = cSegmentor2_Settings() #get default settings and modify
 
         sett2.nn1_models_class_generator = [nn1_dict_gen,
@@ -280,6 +285,8 @@ class cMultiAxisRotationsSegmentor2():
         ]
 
         sett2.nn1_axes_to_models_indices = [0,1,2]
+
+        sett2.nn2_MLP_models_class_generator = nn2_MLP_models_class_generator
 
         sett2.cuda_device = cuda_device #Probably should use kwargs
 
@@ -498,40 +505,12 @@ class cMultiAxisRotationsSegmentor2():
         if not(isinstance(traindata_list, list) and isinstance(trainlabels_list, list) ):
             raise ValueError("Invalid traindata_list or trainlabels_list")
 
-        nmodels = np.unique(self.settings.nn1_axes_to_models_indices)
-        logging.info(f"nmodels:{nmodels}")
-        
+        idx_models = np.unique(self.settings.nn1_axes_to_models_indices)
+        logging.info(f"nmodels:{idx_models}")
 
         # Setup augmentations to apply to 2D images
         logging.info("Setting up augmentations")
-        tfms0 =alb.Compose(
-            [
-            # Images can have different sizes, so don't use fixed target size, replace with CropAndPad
-            #    alb.RandomSizedCrop(
-            #         min_max_height=(img_size // 2, img_size),
-            #         height=img_size,
-            #         width=img_size,
-            #         p=0.5,
-            #     ),
-            alb.CropAndPad(px=None, percent=-0.1, keep_size=False), #May require mid parameters to be specified
-
-            alb.VerticalFlip(p=0.5),
-            alb.RandomRotate90(p=0.5),
-            alb.Transpose(p=0.5),
-            alb.OneOf(
-                [
-                    alb.ElasticTransform(
-                        alpha=120, sigma=120 * 0.07, alpha_affine=120 * 0.04, p=0.5
-                    ),
-                    alb.GridDistortion(p=0.5),
-                    alb.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
-                ],
-                p=0.5,
-            ),
-            alb.CLAHE(p=0.5),
-            alb.OneOf([alb.RandomBrightnessContrast(p=0.5),alb.RandomGamma(p=0.5)], p=0.5),
-            ]
-        )
+        
 
         logging.info("Preprocess volume according to data_vol_norm_process")
         if not self.settings.data_vol_norm_process is None:
@@ -550,8 +529,8 @@ class cMultiAxisRotationsSegmentor2():
                     
                     d0_corr = (d0.astype(np.float32) - d0_mean) / d0_std
                     d0_corr = (np.clip(d0_corr, -3.0, 3.0) +3.0) / 6.0
-
-                    traindata_list0.append(d0_corr)
+                    
+                    traindata_list0.append(d0_corr*255)
 
             elif "mean_stdev_3_5" in self.settings.data_vol_norm_process:
                 for d0 in traindata_list:
@@ -564,36 +543,41 @@ class cMultiAxisRotationsSegmentor2():
                     d0_corr = (d0.astype(np.float32) - d0_mean) / d0_std
                     d0_corr = (np.clip(d0_corr, -3.0, 5.0) +3.0) / 8.0
 
-                    traindata_list0.append(d0_corr)
-                
+                    traindata_list0.append(d0_corr*255)
+            
             #replace traindata_list with corrected
             traindata_list = traindata_list0
 
+        #Ensure data is uint8
+        traindata_list = [ t.astype(np.uint8) for t in traindata_list]
 
         logging.info("Creating train and validation dataloaders for each model")
         # Dataloader(s) will depend on the number of models and respective axes
         dataloaders_train=[]
         dataloaders_test=[]
-        for i in range(nmodels):
+        for i in idx_models:
             #Gets the axes that the NN1 model is supposed to be used
             model_axes= np.flatnonzero(
                 np.array(self.settings.nn1_axes_to_models_indices) == i
             ).tolist()
 
-            ds0 = Input_dataset_along_axes(traindata_list, trainlabels_list,
-                                           model_axes,
-                                           tfms= tfms0,
-                                           preprocess=self.settings.data_vol_norm_process)
+            # Get shape along the axis
+
+            ds0 = NN1_train_input_dataset_along_axes(
+                traindata_list,
+                trainlabels_list,
+                model_axes,
+                self.settings.cuda_device
+            )
 
             dset1, dset2 = torch.utils.data.random_split(ds0, [0.8,0.2])
 
-            dl_train = DataLoader(dset1, batch_size=self.settings.nn1_batch_size)
-            dl_test = DataLoader(dset2, batch_size=self.settings.nn1_batch_size)
+            dl_train = DataLoader(dset1, batch_size=self.settings.nn1_batch_size, shuffle=True)
+            dl_test = DataLoader(dset2, batch_size=self.settings.nn1_batch_size, shuffle=True)
+            logging.info(f"Train and test dataloaders created for model number:{i}, model_axes:{model_axes}, len(train):{len(dl_train)}, len(test):{len(dl_test)}")
 
             dataloaders_train.append(dl_train)
             dataloaders_test.append(dl_test)
-
-            logging.info(f"Train and test dataloaders created for model number:{i}, model_axes:{model_axes}")
 
         logging.info("All dataloaders created.")
         logging.info(f"len(dataloaders_train): {len(dataloaders_train)}")
@@ -605,6 +589,7 @@ class cMultiAxisRotationsSegmentor2():
         nn1_loss_func = None
         if "celoss" in self.settings.nn1_loss_criterion.lower():
             nn1_loss_func = torch.nn.CrossEntropyLoss().to('cuda')
+            #nn1_loss_func = smp.losses.SoftCrossEntropyLoss().to('cuda')
         elif "diceloss" in self.settings.nn1_loss_criterion.lower():
             nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=False).to('cuda')
         else:
@@ -904,7 +889,7 @@ class cMultiAxisRotationsSegmentor2():
         # logging.info(f"NN2 MLPClassifier fit with {len(X_train)} samples, (y_train {len(Y_train)} samples)")
         # self.NN2.fit(X_train,Y_train)
 
-        
+
 
         logging.info(f"NN2 train score:{self.NN2.score(X_train,Y_train)}")
 
@@ -1342,11 +1327,12 @@ class cMultiAxisRotationsSegmentor2():
         return labels,preds
 
 
-class Input_dataset_along_axes(Dataset):
-    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2], tfms=None, preprocess=None):
+class NN1_train_input_dataset_along_axes(Dataset):
+    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2], cuda_device=0):
         
         self.datavols = []
         self.labelsvols = []
+        self.tfms=[]
 
         for d0, l0 in zip(datavols_list,labelsvols_list):
 
@@ -1356,19 +1342,29 @@ class Input_dataset_along_axes(Dataset):
                 if ax0==0:
                     self.datavols.append(d0)
                     self.labelsvols.append(l0)
+                    self.tfms.append(
+                        get_train_augmentations_v0( *d0[0,:,:].shape )
+                    )
                 if ax0==1:
-                    self.datavols.append(d0.permute(2,0,1)) #unlike tranpose, this gets a different view, so no copy done
-                    self.labelsvols.append(l0.permute(2,0,1))
+                    # self.datavols.append(d0.permute(2,0,1)) #unlike tranpose, this gets a different view, so no copy done
+                    # self.labelsvols.append(l0.permute(2,0,1))
+                    self.datavols.append( np.rot90(d0, 1, axes=(0,2)) )
+                    self.labelsvols.append(np.rot90(l0, 1, axes=(0,2)))
+                    self.tfms.append(
+                        get_train_augmentations_v0( *d0[:,0,:].shape )
+                    )
                 if ax0==2:
-                    self.datavols.append(d0.permute(1,2,0)) #unlike tranpose, this gets a different view, so no copy done
-                    self.labelsvols.append(l0.permute(1,2,0))
-                                           
-        
-        self.tfms=tfms
+                    self.datavols.append( np.rot90(d0, 1, axes=(0,1)) )
+                    self.labelsvols.append(np.rot90(l0, 1, axes=(0,1)))
+                    self.tfms.append(
+                        get_train_augmentations_v0( *d0[:,:,0].shape )
+                    )
         
         self._idx_cum_sum = np.cumsum(np.array([i.shape[0] for i in self.labelsvols]))
         self._idx_cum_sum =np.concatenate(([0],self._idx_cum_sum), axis=0) #zslices
         
+        self.cuda_device = cuda_device
+
     def __len__(self):
         return self._idx_cum_sum[-1] #last vlaue of the cumulative sum has the number of indices
 
@@ -1380,17 +1376,22 @@ class Input_dataset_along_axes(Dataset):
         
         #print(f"idx:{idx}, vol_idx:{vol_idx}, z_idx:{z_idx}")
         
-        data = self.datavols[vol_idx][z_idx,:,:].numpy() #Convert to numpy as data is in torch tensor and albumentations only support numpy
-        labels = self.labelsvols[vol_idx][z_idx,:,:].numpy()
+        data = self.datavols[vol_idx][z_idx,:,:]
+        labels = self.labelsvols[vol_idx][z_idx,:,:]
         
         #print(f"data shape:{data.shape}, dtype:{dtype}")
         assert data.shape == labels.shape
 
         # Apply transforms
-        res =self.tfms(image=data, mask=labels)
+        res =self.tfms[vol_idx](image=data, mask=labels)
+        #transforms returns torch tensor
+
         data=res['image']
         labels=res['mask']
         
+        data= data.to(f"cuda:{self.cuda_device}").float()
+        labels=labels.to(f"cuda:{self.cuda_device}").long()
+
         #return a tuple data, mask
         return data, labels
 
@@ -1427,10 +1428,14 @@ class VolumeSlicerDataset(Dataset):
         return res
 
 def X_parse(X):
-    return X.to('cuda')
+    #return X.to('cuda')
+    #return torch.unsqueeze(X.to('cuda'),dim=1).float()
+    return torch.unsqueeze(X,dim=1).float()
 
 def y_parse(y):
-    return torch.unsqueeze(y.to('cuda'),dim=1).float()
+    #return torch.unsqueeze(y.to('cuda'),dim=1).float()
+    #return y.to('cuda')
+    return y.long()
 
 def train_loop(dataloader, model, loss_fn, optimizer, scaler, scheduler, do_log=True):
     size = len(dataloader.dataset)
@@ -1440,8 +1445,9 @@ def train_loop(dataloader, model, loss_fn, optimizer, scaler, scheduler, do_log=
     for batch, (X, y) in enumerate(dataloader):
         X=X_parse(X)
         # Compute prediction and loss
-        pred = model(X) #returns shape(8,1,512,512)
+        pred = model(X)
 
+        #y= y_parse(y) # to cuda
         loss = loss_fn(pred, y)
 
         # Backpropagation
@@ -1504,3 +1510,45 @@ def train_model(model0, dl_train, dl_test, loss_fn, optimizer, scaler, scheduler
         test_res= test_loop(dl_test, model0, loss_fn, metric_fn=metric_fn)
         epoch_test_losses.append(test_res["avg_loss"])
     logging.info(f"Done! Final loss is : {test_res['avg_loss']}, and metric is: {test_res['avg_metric']}")
+
+def get_train_augmentations_v0(h,w):
+
+    def get_nearest_multiple_of_32(v):
+        i32 = v//32
+        return i32*32
+
+    img_h, img_w = h,w
+
+    img_h32, img_w32 = get_nearest_multiple_of_32(img_h),  get_nearest_multiple_of_32(img_w)
+    assert img_h32>0 and img_w>0
+
+    tfms0 =alb.Compose(
+                [
+                alb.RandomSizedCrop(
+                    min_max_height= (img_h32//2, img_h32),
+                    height=img_h32,
+                    width=img_w32 ,
+                    p=0.5,
+                ),
+                #Deciding what resizing augmentations is difficult not kowing what
+                # sizes the images can be different
+
+                alb.VerticalFlip(p=0.5),
+                alb.RandomRotate90(p=0.5),
+                alb.Transpose(p=0.5),
+                alb.OneOf(
+                    [
+                        alb.ElasticTransform(
+                            alpha=120, sigma=120 * 0.07, alpha_affine=120 * 0.04, p=0.5
+                        ),
+                        alb.GridDistortion(p=0.5),
+                        alb.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+                    ],
+                    p=0.5,
+                ),
+                alb.CLAHE(p=0.5),
+                alb.OneOf([alb.RandomBrightnessContrast(p=0.5),alb.RandomGamma(p=0.5)], p=0.5),
+                alb.pytorch.ToTensorV2()
+                ]
+            )
+    return tfms0
