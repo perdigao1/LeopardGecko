@@ -191,7 +191,7 @@ class cMultiAxisRotationsSegmentor2():
 
     def init_models_from_settings(self):
         self._NN1_models = [ self.create_nn1_ptmodel_from_class_generator(x).to(f"cuda:{self.settings.cuda_device}") for x in self.settings.nn1_models_class_generator]
-        self._NN2_model = self.create_nn2_ptmodel_from_class_generator( self.settings.nn2_MLP_models_class_generator.to(f"cuda:{self.settings.cuda_device}") )
+        self._NN2_model = self.create_nn2_ptmodel_from_class_generator( self.settings.nn2_MLP_models_class_generator).to(f"cuda:{self.settings.cuda_device}")
         
     @staticmethod
     def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
@@ -506,13 +506,13 @@ class cMultiAxisRotationsSegmentor2():
             raise ValueError("Invalid traindata_list or trainlabels_list")
 
         idx_models = np.unique(self.settings.nn1_axes_to_models_indices)
-        logging.info(f"nmodels:{idx_models}")
+        logging.info(f"idx_models:{idx_models}")
 
         # Setup augmentations to apply to 2D images
         logging.info("Setting up augmentations")
         
 
-        logging.info("Preprocess volume according to data_vol_norm_process")
+        logging.info(f"Preprocess volume according to data_vol_norm_process: {self.settings.data_vol_norm_process}")
         if not self.settings.data_vol_norm_process is None:
 
             #Normalise volumetric data to setting chosen
@@ -596,7 +596,6 @@ class cMultiAxisRotationsSegmentor2():
             raise ValueError(f"{self.settings.nn1_loss_criterion} not a valid loss criteria")
         
         # Setup metrics for test data
-        # TODO
         nn1_metric_func = None
         if "meaniou" in self.settings.nn1_eval_metric.lower():
             nn1_metric_func = segmentation_models_pytorch.utils.metrics.IoU()
@@ -607,7 +606,9 @@ class cMultiAxisRotationsSegmentor2():
 
 
         #Train each model
+        logging.info("Start training each model sequentially.")
         for i,model0 in enumerate(self._NN1_models):
+            logging.info(f"Training model number: {i}")
             # get respective dataloader
             dl_train0 = dataloaders_train[i]
             dl_test0 = dataloaders_test[i]
@@ -1427,15 +1428,15 @@ class VolumeSlicerDataset(Dataset):
 
         return res
 
-def X_parse(X):
-    #return X.to('cuda')
-    #return torch.unsqueeze(X.to('cuda'),dim=1).float()
-    return torch.unsqueeze(X,dim=1).float()
+# def X_parse(X):
+#     #return X.to('cuda')
+#     #return torch.unsqueeze(X.to('cuda'),dim=1).float()
+#     return X.float()
 
-def y_parse(y):
-    #return torch.unsqueeze(y.to('cuda'),dim=1).float()
-    #return y.to('cuda')
-    return y.long()
+# def y_parse(y):
+#     #return torch.unsqueeze(y.to('cuda'),dim=1).float()
+#     #return y.to('cuda')
+#     return y.long()
 
 def train_loop(dataloader, model, loss_fn, optimizer, scaler, scheduler, do_log=True):
     size = len(dataloader.dataset)
@@ -1443,7 +1444,7 @@ def train_loop(dataloader, model, loss_fn, optimizer, scaler, scheduler, do_log=
     # Unnecessary in this situation but added for best practices
     model.train()
     for batch, (X, y) in enumerate(dataloader):
-        X=X_parse(X)
+        #X=X_parse(X)
         # Compute prediction and loss
         pred = model(X)
 
@@ -1479,7 +1480,7 @@ def test_loop(dataloader, model, loss_fn, metric_fn=None):
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
         for X, y in dataloader:
-            X=X_parse(X)
+            #X=X_parse(X)
             #y=y_parse(y)
             pred = model(X)
             test_loss = loss_fn(pred, y).item()
@@ -1503,6 +1504,7 @@ def test_loop(dataloader, model, loss_fn, metric_fn=None):
     return {"avg_loss":avg_loss, "avg_metric":avg_metric}
 
 def train_model(model0, dl_train, dl_test, loss_fn, optimizer, scaler, scheduler, epochs, metric_fn=None):
+    logging.info("train_model()")
     epoch_test_losses=[]
     for t in range(epochs):
         logging.info(f"---- Epoch {t+1}/{epochs} ----")
