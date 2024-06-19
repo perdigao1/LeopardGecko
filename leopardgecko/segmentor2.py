@@ -1101,7 +1101,6 @@ def NN2_predict_from_pd(all_pred_pd):
 
     """
     logging.info("NN2_predict_from_pd()")
-    logging.info(f"all_pred_pd().")
 
     global torch_device_str_nn2
 
@@ -1116,22 +1115,49 @@ def NN2_predict_from_pd(all_pred_pd):
     for iset in range(nsets):
         data_4d = data_all_np5d[iset]
         s = data_4d.shape
-        p0= data_4d.reshape( (s[0]*s[1], np.prod(s[2:])) )
+        nelements = int(np.prod(s[2:]))
+        p0= data_4d.reshape( (s[0]*s[1], nelements) )
         data_flat_for_mlp= p0.transpose((1,0))
-        topred_tc= torch.from_numpy(data_flat_for_mlp).float().to(torch_device_str_nn2)
-        data_tc_ds = TensorDataset(topred_tc)
-        data_tc_batcher = DataLoader(data_tc_ds, batch_size=4096, shuffle=False)
 
-        NN2_model_fusion.to(torch_device_str_nn2)
-        NN2_model_fusion.eval()
+        nelements_256 = int(nelements//256)
+        # device and batch sizes, cpu and batch size fallback 
+        attempts = [ #(torch_device_str_nn2, nelements), # Using gpu is slow
+                    ("cpu", nelements_256),
+                    ("cpu", 65535), #Fallback(s)
+                    ("cpu", 4096)
+                    ]
+        
         res_s=[]
-        with torch.no_grad():
-            logging.info("Beggining NN2 inference of whole volume")
-            for data_batch in tqdm(data_tc_batcher):
-                #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
-                pred = NN2_model_fusion(data_batch[0])
-                pred_argmax = torch.argmax(pred,dim=1)
-                res_s.append(pred_argmax)
+        b_succeed=False
+        for at0 in attempts:
+            torchdev, batchsize = at0
+            try:
+                logging.info(f"Attempting to run NN2 inference on nelements:{nelements} with torchdev:{torchdev} and batchsize:{batchsize}")
+                topred_tc= torch.from_numpy(data_flat_for_mlp).float().to(torchdev)
+                data_tc_ds = TensorDataset(topred_tc)
+                data_tc_batcher = DataLoader(data_tc_ds, batch_size=batchsize, shuffle=False)
+
+                NN2_model_fusion.to(torchdev)
+                NN2_model_fusion.eval()
+                res_s=[]
+                with torch.no_grad():
+                    logging.info("Beggining NN2 inference of whole volume")
+                    for data_batch in tqdm(data_tc_batcher):
+                        #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
+                        pred = NN2_model_fusion(data_batch[0])
+                        pred_argmax = torch.argmax(pred,dim=1)
+                        res_s.append(pred_argmax)
+                b_succeed=True
+            except Exception as e:
+                logging.error(f"Error occured, the following exception was throuwn. {str(e)}")
+            
+            if b_succeed:
+                break
+        else:
+            # This will run if the for loop did not encounter a break
+            # which will happend in case of no success in running the inference
+            raise RuntimeError(f"Could not run inference with NN2.")
+        
         r0 = torch.concatenate(res_s) #Collect all inference batches to a singly flattened array
         r2 = r0.detach().cpu().numpy().astype(np.uint8).reshape(*s[2:])
         logging.info(f"iset:{iset}, nn2 prediction shape:{r2.shape}")
