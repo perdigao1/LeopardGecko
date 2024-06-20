@@ -54,7 +54,7 @@ import segmentation_models_pytorch.utils
 import matplotlib.pyplot as plt
 
 import logging
-logging.basicConfig(level=logging.INFO)
+#logging.basicConfig(level=logging.INFO)
 
 import tifffile
 import h5py
@@ -134,15 +134,19 @@ def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
         #Segmentation models pytorch
         arch = nn1_cls_gen_dict['arch'].lower()
         if arch=="unet" or arch=="u_net":
-            NN_class = smp.Unet
+            model_arch = smp.Unet
         elif arch=="manet":
-            NN_class = smp.MAnet
+            model_arch = smp.MAnet
         elif arch=="fpn":
-            NN_class = smp.FPN
+            model_arch = smp.FPN
+        elif "pan" in m:
+            model_arch=smp.PAN
+        elif "pspnet" in m:
+            model_arch=smp.PSPNet
         else:
             raise ValueError(f"arch:{arch} not valid.")
         
-        model0 = NN_class(
+        model0 = model_arch(
             encoder_name = nn1_cls_gen_dict['encoder_name'],
             encoder_weights = nn1_cls_gen_dict['encoder_weights'],
             in_channels = nn1_cls_gen_dict['in_nchannels'],
@@ -163,7 +167,7 @@ def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
 NN1_models = None
 nn1_axes_to_models_indices = [0,1,2] #default
 
-def update_NN1_models_from_generators():
+def update_nn1_models_from_generators():
     """
     Sets up NN1_models based in information from nn1_models_class_generator
     Also sends torch model to torch_device_str
@@ -556,8 +560,8 @@ def _save_pred_data(folder, data, count,axis, rot):
 
     return file_path
 
-
-def train_NN1(traindata_list, trainlabels_list):
+last_train_nn1_progress=None
+def train_nn1(traindata_list, trainlabels_list):
     """
     Train each of the NN1 models individually taking into
     consideration the axis they are associated to
@@ -566,6 +570,7 @@ def train_NN1(traindata_list, trainlabels_list):
     global NN1_models
     global nn1_axes_to_models_indices
     global nn1_batch_size
+    global last_train_nn1_progress
 
     if NN1_models is None:
         raise ValueError("No NN1 models to train")
@@ -585,6 +590,7 @@ def train_NN1(traindata_list, trainlabels_list):
     if len(models_to_axis)==0:
         raise ValueError("models_to_axis has no elements")
     
+    last_train_nn1_progress={}
     for imodel, axs in enumerate(models_to_axis):
 
         if len(axs)==0:
@@ -633,11 +639,14 @@ def train_NN1(traindata_list, trainlabels_list):
         #train model here
         logging.info("Training launching.")
 
-        _ = train_model(model, dl_train, dl_test, nn1_loss_func_and_activ, optimizer, scaler, scheduler,
+        train_prgr = train_model(model, dl_train, dl_test, nn1_loss_func_and_activ, optimizer, scaler, scheduler,
             epochs=epochs,
             metric_fn=nn1_metric_func
             )
+        last_train_nn1_progress[imodel]=train_prgr
+
         logging.info(f"Training model {imodel} along {axs} complete.")
+
 
 
 class VolumeSlicerDataset(Dataset):
@@ -681,7 +690,7 @@ class VolumeSlicerDataset(Dataset):
         return res_torch
 
 
-def nn1_predict_slices_along_axis_1(datavol, axis):
+def predict_nn1_slices_along_axis_1(datavol, axis):
     """
     Inference of a single datavol along the given axis
     using the respective NN1_models
@@ -745,7 +754,7 @@ def nn1_predict_slices_along_axis_1(datavol, axis):
     return pred_oriented, labels_oriented
 
 
-def predict_NN1(data_to_predict_l, path_out_results):
+def predict_nn1(data_to_predict_l, path_out_results):
 
     """
     Runs predictions from a list of datavolumes, by 12-way (4 rotations * 3 axis)
@@ -795,7 +804,7 @@ def predict_NN1(data_to_predict_l, path_out_results):
             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(1,2))) #rotate
 
             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=0, device_str=cuda_str)
-            prob0,lab0 = nn1_predict_slices_along_axis_1(data_vol, 0)
+            prob0,lab0 = predict_nn1_slices_along_axis_1(data_vol, 0)
 
             #invert rotations before saving
             pred_probs = np.rot90(prob0, -krot, axes=(2,3)) 
@@ -820,7 +829,7 @@ def predict_NN1(data_to_predict_l, path_out_results):
             #planeZX=(0,2)
             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,2))) #rotate
             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=1, device_str=cuda_str)
-            prob0,lab0 = nn1_predict_slices_along_axis_1(data_vol, 1)
+            prob0,lab0 = predict_nn1_slices_along_axis_1(data_vol, 1)
 
 
             pred_probs = np.rot90(prob0, -krot, axes=(1,3)) #invert rotation before saving
@@ -845,7 +854,7 @@ def predict_NN1(data_to_predict_l, path_out_results):
             #planeZY=(0,1)
             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,1))) #rotate
             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=2, device_str=cuda_str)
-            prob0,lab0 = nn1_predict_slices_along_axis_1(data_vol, 2)
+            prob0,lab0 = predict_nn1_slices_along_axis_1(data_vol, 2)
 
             pred_probs = np.rot90(prob0, -krot, axes=(1,2)) #invert rotation before saving
             pred_labels = np.rot90(lab0, -krot, axes=(0,1))
@@ -876,7 +885,7 @@ def predict_NN1(data_to_predict_l, path_out_results):
 
 
 # NN2 (MLP)
-NN2_model_fusion=None
+nn2_model_fusion=None
 nn2_MLP_model_class_generator=None
 torch_device_str_nn2=torch_device_str # User will have to specify if different
 
@@ -956,22 +965,22 @@ def create_nn2_ptmodel_from_class_generator(nn2_cls_gen_dict: dict ):
         
     return model0
 
-def update_NN2_model_from_generator():
+def update_nn2_model_from_generator():
     """
     Sets up NN2_model_fusion based in information from ...
     Also sends torch model to torch_device_str_nn2
     """
 
     global nn2_MLP_model_class_generator
-    global NN2_model_fusion
+    global nn2_model_fusion
     global torch_device_str_nn2
 
     logging.info("update_NN2_model_from_generator()")
 
-    NN2_model_fusion=None
+    nn2_model_fusion=None
     if nn2_MLP_model_class_generator is not None:
-        NN2_model_fusion = create_nn2_ptmodel_from_class_generator(nn2_MLP_model_class_generator)
-        NN2_model_fusion.to(torch_device_str_nn2)
+        nn2_model_fusion = create_nn2_ptmodel_from_class_generator(nn2_MLP_model_class_generator)
+        nn2_model_fusion.to(torch_device_str_nn2)
 
 def aggregate_data_from_pd(all_pred_pd):
     data_all_np6d=None
@@ -1011,15 +1020,18 @@ nn2_lr = 1e-6
 nn2_max_lr = 5e-2
 #nn2_loss_func_and_activ=None
 
-
-def NN2_train(data_all_np6d, trainlabels_list):
+last_train_nn2_progress = None
+def train_nn2(data_all_np6d, trainlabels_list):
     """
-    data_all_np5d: per voxel per class probabilites of predictions. Can be collected using aggregate_data_from_pd()
-    Typical shape from one datavolume 256x256x256 prediction, 3 class, 12 predictions, (1, 12, 3, 256, 256, 256)
+    data_all_np5d: per voxel per class probabilites of predictions.
+    This can be collected using aggregate_data_from_pd() with output from predict_nn1()
+
+    Typical shape from one datavolume 256x256x256 prediction,
+    3 class, 12 predictions, (1, 12, 3, 256, 256, 256)
 
     """
 
-    global NN2_model_fusion
+    global nn2_model_fusion
     global nn2_ntrain
     global nn2_train_epochs
     global nn2_batch_size
@@ -1027,11 +1039,12 @@ def NN2_train(data_all_np6d, trainlabels_list):
     global nn2_max_lr
     global nn2_loss_func_and_activ
     global torch_device_str_nn2
+    global last_train_nn2_progress
 
     logging.info(f"NN2_train()")
     logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
 
-    if NN2_model_fusion is None:
+    if nn2_model_fusion is None:
         raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
 
     p0 = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2))
@@ -1040,14 +1053,15 @@ def NN2_train(data_all_np6d, trainlabels_list):
 
     trainlabels_list_np = np.array(trainlabels_list)
     label_flat_for_mlp = trainlabels_list_np.ravel()
-    logging.info(f"label_flat_for_mlp.shape: {label_flat_for_mlp}")
+    logging.info(f"label_flat_for_mlp.shape: {label_flat_for_mlp.shape}")
 
     X_train= torch.from_numpy(data_flat_for_mlp).float()
     y_train= torch.from_numpy(label_flat_for_mlp).long()
 
     logging.info("Selecting only nn2_ntrain voxel coordinates from data and ground truth for training")
-
-    subset_indices = torch.randperm(X_train.shape[0])[:nn2_ntrain]
+    
+    rand_indices = torch.randperm(X_train.shape[0])
+    subset_indices = rand_indices[:nn2_ntrain]
 
     X_train_subset = X_train[subset_indices,:].to(torch_device_str_nn2)
     y_train_subset = y_train[subset_indices].to(torch_device_str_nn2)
@@ -1055,7 +1069,15 @@ def NN2_train(data_all_np6d, trainlabels_list):
     subset_dataset = TensorDataset(X_train_subset, y_train_subset)
     nn2_train_loader = DataLoader(subset_dataset, batch_size=nn2_batch_size, shuffle=True)
 
-    model=NN2_model_fusion
+    #test dataset is a quarter of train dataset
+    ntest = int(nn2_ntrain//4)
+    test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
+    X_train_subset_test = X_train[test_subset_indices,:].to(torch_device_str_nn2)
+    y_train_subset_test = y_train[test_subset_indices].to(torch_device_str_nn2)
+    subset_dataset_test = TensorDataset(X_train_subset_test, y_train_subset_test)
+    nn2_train_loader_test = DataLoader(subset_dataset_test, batch_size=nn2_batch_size, shuffle=True)
+
+    model=nn2_model_fusion
     model.to(torch_device_str_nn2)# ensure is in the correct device
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=nn2_lr)
@@ -1076,20 +1098,21 @@ def NN2_train(data_all_np6d, trainlabels_list):
     # activ = torch.nn.Sigmoid() we may need this
 
     logging.info("Beggining training NN2.")
-    train_model(
+
+    last_train_nn2_progress = train_model(
         model,
         nn2_train_loader,
-        None, # use train data as test?
+        nn2_train_loader_test, # use train data as test?
         nn2_loss_func_and_activ,
         optimizer, scaler, scheduler,
         epochs=epochs,
-        metric_fn=None
+        metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
     )
 
     logging.info("Training NN2 complete.")
 
 
-def NN2_predict_from_pd(all_pred_pd):
+def predict_nn2_from_pd(all_pred_pd):
     """
     Runs NN2 fusion predictions(inference) from several probabiliy data volumes
     Data volumes are provided as h5 files format with information in a pandas dataframe
@@ -1137,14 +1160,14 @@ def NN2_predict_from_pd(all_pred_pd):
                 data_tc_ds = TensorDataset(topred_tc)
                 data_tc_batcher = DataLoader(data_tc_ds, batch_size=batchsize, shuffle=False)
 
-                NN2_model_fusion.to(torchdev)
-                NN2_model_fusion.eval()
+                nn2_model_fusion.to(torchdev)
+                nn2_model_fusion.eval()
                 res_s=[]
                 with torch.no_grad():
                     logging.info("Beggining NN2 inference of whole volume")
                     for data_batch in tqdm(data_tc_batcher):
                         #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
-                        pred = NN2_model_fusion(data_batch[0])
+                        pred = nn2_model_fusion(data_batch[0])
                         pred_argmax = torch.argmax(pred,dim=1)
                         res_s.append(pred_argmax)
                 b_succeed=True
@@ -1205,37 +1228,41 @@ def train(datavols_list, labels_list):
 
     if len(NN1_models)==0:
         raise ValueError("No NN1 models. Make sure you set this up first.")
-    if NN2_model_fusion is None:
+    if nn2_model_fusion is None:
         raise ValueError("No NN2_model_fusion. Make sure you set this up first.")
 
     datavols_list0 = normalise_volumes(datavols_list)
 
     assert datavols_list is not None
 
-    train_NN1(datavols_list0, labels_list)
+    train_nn1(datavols_list0, labels_list)
 
     logging.info("Next train stage is to run 12-way predictions, and use prediction data to train NN2")
     tempdir_pred= tempfile.TemporaryDirectory()
     path_out_results = Path(tempdir_pred.name)
     logging.info(f"tempdir_pred_path:{path_out_results}")
 
-    res_pds = predict_NN1(datavols_list0, path_out_results)
+    res_pds = predict_nn1(datavols_list0, path_out_results)
 
     logging.info("Passing the predicitons to NN2 for training")
 
     data_all_np5d = aggregate_data_from_pd(res_pds)
 
-    NN2_train(data_all_np5d, labels_list)
+    train_nn2(data_all_np5d, labels_list)
 
     logging.info("NN1 and NN2 training complete. Don't forget to save model.")
 
-
+last_nn1_prediction_df = None
 def predict(datavols_list):
     """
     predict, NN1 followed by NN2
 
-    Assumes datavols have not been normalised so normalise them here
+    Assumes datavols have not been normalised so normalise them here before running the DL
+
+    NN1 predictions dataframe is stored in global variable last_nn1_prediction_df
+
     """
+    global last_nn1_prediction_df
 
     logging.info("predict()")
 
@@ -1246,11 +1273,10 @@ def predict(datavols_list):
     tempdir_pred= tempfile.TemporaryDirectory()
     path_out_results = Path(tempdir_pred.name)
     logging.info(f"tempdir_pred_path:{path_out_results}")
-    
 
-    res_pd = predict_NN1(datavols_list0, path_out_results)
+    last_nn1_prediction_df = predict_nn1(datavols_list0, path_out_results)
 
-    nn2_preds = NN2_predict_from_pd(res_pd)
+    nn2_preds = predict_nn2_from_pd(last_nn1_prediction_df)
 
     return nn2_preds
 
@@ -1263,7 +1289,7 @@ def save_lgsegm2_model(fn_out):
 
     """
 
-    NN1_models_state_dict = [ m.state_dict() for m in NN1_models]
+    nn1_models_state_dict = [ m.state_dict() for m in NN1_models]
 
     
     train_info = f"""
@@ -1287,10 +1313,10 @@ nn2_max_lr: {nn2_max_lr}
     "nn1_models_class_generator": nn1_models_class_generator,
     "nn1_axes_to_models_indices": nn1_axes_to_models_indices,
     "data_vol_norm_process_str": data_vol_norm_process_str,
-    "NN1_models_state_dict": NN1_models_state_dict,
+    "NN1_models_state_dict": nn1_models_state_dict,
 
     "nn2_MLP_model_class_generator": nn2_MLP_model_class_generator,
-    "NN2_model_dict":NN2_model_fusion.state_dict(),
+    "NN2_model_dict":nn2_model_fusion.state_dict(),
 
     "train_info": train_info
     }
@@ -1308,7 +1334,7 @@ def load_lgsegm2_model(fn):
     global nn2_MLP_model_class_generator
 
     global NN1_models
-    global NN2_model_fusion
+    global nn2_model_fusion
 
     logging.info(f"load_lgsegm2_model(), with file {fn}")
     load_model = torch.load(fn)
@@ -1326,7 +1352,7 @@ def load_lgsegm2_model(fn):
     for cg0 in nn1_models_class_generator:
         cg0['encoder_weights'] = None # Ensure no weights are preloaded
     
-    update_NN1_models_from_generators()
+    update_nn1_models_from_generators()
 
     assert len(NN1_models) == len(NN1_models_state_dict)
 
@@ -1338,10 +1364,10 @@ def load_lgsegm2_model(fn):
 
     logging.info("Loading NN2 model")
 
-    update_NN2_model_from_generator()
+    update_nn2_model_from_generator()
     
-    NN2_model_fusion.load_state_dict(NN2_model_dict)
-    NN2_model_fusion.to(torch_device_str_nn2)
+    nn2_model_fusion.load_state_dict(NN2_model_dict)
+    nn2_model_fusion.to(torch_device_str_nn2)
 
     logging.info("Loading model complete.")
 
@@ -1360,8 +1386,35 @@ def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
 
     nn1_epochs= 10
 
-    update_NN1_models_from_generators()
-    update_NN2_model_from_generator()
+    update_nn1_models_from_generators()
+    update_nn2_model_from_generator()
+
+    train(datavols_list, labels_list)
+
+    logging.info("Training complete")
+
+
+def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
+    global nn1_models_class_generator
+    global nn1_axes_to_models_indices
+    global nn2_MLP_model_class_generator
+    global nn1_epochs
+
+    logging.info("quick_new_and_train_one_unet_model_per_axis")
+
+    nn1_models_class_generator= [nn1_dict_gen_default,
+    nn1_dict_gen_default.copy()]
+    
+    nn1_axes_to_models_indices = [0,1,1]
+
+    nn2_MLP_model_class_generator= nn2_MLP_model_class_generator_default
+    # Default 3 unet models, one per axis. 3 classes
+    # NN2, MLP 10,10
+
+    nn1_epochs= 10
+
+    update_nn1_models_from_generators()
+    update_nn2_model_from_generator()
 
     train(datavols_list, labels_list)
 
