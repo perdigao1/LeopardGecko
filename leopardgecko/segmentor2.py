@@ -1430,7 +1430,7 @@ def quick_new_and_train_single_unet_for_all_axis(datavols_list, labels_list):
     global nn2_MLP_model_class_generator
     global nn1_epochs
 
-    logging.info("quick_new_and_train_one_unet_model_per_axis")
+    logging.info("quick_new_and_train_single_unet_for_all_axis")
 
     nn1_models_class_generator= [nn1_dict_gen_default]
     
