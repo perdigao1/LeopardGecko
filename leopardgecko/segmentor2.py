@@ -1372,6 +1372,9 @@ def load_lgsegm2_model(fn):
     logging.info("Loading model complete.")
 
 
+
+
+
 # Shortcut functions to create train and create models
 def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
     global nn1_models_class_generator
@@ -1406,6 +1409,32 @@ def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
     nn1_dict_gen_default.copy()]
     
     nn1_axes_to_models_indices = [0,1,1]
+
+    nn2_MLP_model_class_generator= nn2_MLP_model_class_generator_default
+    # Default 3 unet models, one per axis. 3 classes
+    # NN2, MLP 10,10
+
+    nn1_epochs= 10
+
+    update_nn1_models_from_generators()
+    update_nn2_model_from_generator()
+
+    train(datavols_list, labels_list)
+
+    logging.info("Training complete")
+
+
+def quick_new_and_train_single_unet_for_all_axis(datavols_list, labels_list):
+    global nn1_models_class_generator
+    global nn1_axes_to_models_indices
+    global nn2_MLP_model_class_generator
+    global nn1_epochs
+
+    logging.info("quick_new_and_train_one_unet_model_per_axis")
+
+    nn1_models_class_generator= [nn1_dict_gen_default]
+    
+    nn1_axes_to_models_indices = [0,0,0]
 
     nn2_MLP_model_class_generator= nn2_MLP_model_class_generator_default
     # Default 3 unet models, one per axis. 3 classes
