@@ -65,8 +65,6 @@ from tqdm import tqdm
 
 data_vol_norm_process_str = "mean_stdev_3" #standard clipping
 
-cuda_device=0
-
 nn1_loss_criterion='DiceLoss'
 nn1_eval_metric='MeanIoU'
 nn1_lr=1e-5
@@ -94,7 +92,6 @@ nn1_axes_to_models_indices = [0,1,2] # By default use the same model for all axe
 temp_data_outdir = None
 
 
-#cuda_str = f"cuda:{cuda_device}"
 torch_device_str="cpu"
 if torch.cuda.is_available():
     torch_device_str = "cuda:0"
@@ -163,7 +160,6 @@ def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
 
     return model0
 
-# NN1_models = [ create_nn1_ptmodel_from_class_generator(x).to(f"cuda:{cuda_device}") for x in nn1_models_class_generator]
 NN1_models = None
 nn1_axes_to_models_indices = [0,1,2] #default
 
