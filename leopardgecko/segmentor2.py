@@ -72,8 +72,8 @@ nn1_eval_metric='MeanIoU'
 nn1_lr=1e-5
 nn1_max_lr=3e-2
 
-# nn1_epochs = 15
-nn1_epochs = 5 # debug
+nn1_train_epochs = 10
+# nn1_train_epochs = 5 # debug
 
 nn1_batch_size = 2
 nn1_num_workers = 1
@@ -571,6 +571,7 @@ def train_nn1(traindata_list, trainlabels_list):
     global nn1_axes_to_models_indices
     global nn1_batch_size
     global last_train_nn1_progress
+    global nn1_train_epochs
 
     if NN1_models is None:
         raise ValueError("No NN1 models to train")
@@ -620,7 +621,7 @@ def train_nn1(traindata_list, trainlabels_list):
         optimizer = torch.optim.AdamW(model.parameters(), lr=nn1_lr)
         scaler=torch.cuda.amp.GradScaler()
 
-        epochs = nn1_epochs #global
+        epochs = nn1_train_epochs #global
         #epochs = 10
 
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -789,12 +790,13 @@ def predict_nn1(data_to_predict_l, path_out_results):
     pred_rots=[]
     pred_ipred=[]
     pred_shapes=[]
-    itag=0
+
 
     for iset, data_to_predict in enumerate(data_to_predict_l):
         logging.info(f"Data to predict iset:{iset}")
         #data_vol = np.array(data_to_predict0) #Copies
 
+        ipred=0
         for krot in range(0, 4): #Around axis rotations
             rot_angle_degrees = krot * 90
             logging.info(f"Volume to be rotated by {rot_angle_degrees} degrees")
@@ -820,9 +822,9 @@ def predict_nn1(data_to_predict_l, path_out_results):
             pred_sets.append(iset)
             pred_planes.append("YX")
             pred_rots.append(rot_angle_degrees)
-            pred_ipred.append(itag)
+            pred_ipred.append(ipred)
             pred_shapes.append(pred_labels.shape)
-            itag+=1
+            ipred+=1
 
 
 
@@ -845,9 +847,9 @@ def predict_nn1(data_to_predict_l, path_out_results):
             pred_sets.append(iset)
             pred_planes.append("ZX")
             pred_rots.append(rot_angle_degrees)
-            pred_ipred.append(itag)
+            pred_ipred.append(ipred)
             pred_shapes.append(pred_labels.shape)
-            itag+=1
+            ipred+=1
 
 
 
@@ -869,9 +871,9 @@ def predict_nn1(data_to_predict_l, path_out_results):
             pred_sets.append(iset)
             pred_planes.append("ZY")
             pred_rots.append(rot_angle_degrees)
-            pred_ipred.append(itag)
+            pred_ipred.append(ipred)
             pred_shapes.append(pred_labels.shape)
-            itag+=1
+            ipred+=1
 
     all_pred_pd = pd.DataFrame({
         'pred_data_probs_filenames': pred_data_probs_filenames,
@@ -1017,8 +1019,9 @@ def aggregate_data_from_pd(all_pred_pd):
 
 
 #nn2_max_iter = 1000
-nn2_ntrain = 262144 #Note that this is not a MLPClassifier parameter
-nn2_train_epochs = 20
+nn2_ntrain = 262144 #Number of random voxels to be considered for dataset training nn2
+nn2_train_epochs = 10
+# nn2_train_epochs = 10 #debug
 nn2_batch_size = 4096
 nn2_lr = 1e-6
 nn2_max_lr = 5e-2
@@ -1302,7 +1305,7 @@ nn1_loss_criterion: {nn1_loss_criterion}
 nn1_eval_metric: {nn1_eval_metric}
 nn1_lr: {nn1_lr}
 nn1_max_lr: {nn1_max_lr}
-nn1_epochs: {nn1_epochs}
+nn1_train_epochs: {nn1_train_epochs}
 
 nn1_batch_size = 2
 nn1_num_workers = 1
@@ -1384,7 +1387,7 @@ def load_lgsegm2_model(fn):
 def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
     global nn1_models_class_generator
     global nn2_MLP_model_class_generator
-    global nn1_epochs
+    global nn1_train_epochs
     logging.info("quick_new_and_train_one_unet_model_per_axis")
 
     nn1_models_class_generator= nn1_models_class_generator_default
@@ -1392,7 +1395,7 @@ def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
     # Default 3 unet models, one per axis. 3 classes
     # NN2, MLP 10,10
 
-    nn1_epochs= 10
+    #nn1_train_epochs= 10
 
     update_nn1_models_from_generators()
     update_nn2_model_from_generator()
@@ -1406,7 +1409,7 @@ def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
     global nn1_models_class_generator
     global nn1_axes_to_models_indices
     global nn2_MLP_model_class_generator
-    global nn1_epochs
+    global nn1_train_epochs
 
     logging.info("quick_new_and_train_one_unet_model_per_axis")
 
@@ -1419,7 +1422,7 @@ def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
     # Default 3 unet models, one per axis. 3 classes
     # NN2, MLP 10,10
 
-    nn1_epochs= 10
+    #nn1_train_epochs= 10
 
     update_nn1_models_from_generators()
     update_nn2_model_from_generator()
@@ -1433,7 +1436,7 @@ def quick_new_and_train_single_unet_for_all_axis(datavols_list, labels_list):
     global nn1_models_class_generator
     global nn1_axes_to_models_indices
     global nn2_MLP_model_class_generator
-    global nn1_epochs
+    global nn1_train_epochs
 
     logging.info("quick_new_and_train_single_unet_for_all_axis")
 
@@ -1445,7 +1448,7 @@ def quick_new_and_train_single_unet_for_all_axis(datavols_list, labels_list):
     # Default 3 unet models, one per axis. 3 classes
     # NN2, MLP 10,10
 
-    nn1_epochs= 10
+    #nn1_train_epochs= 10
 
     update_nn1_models_from_generators()
     update_nn2_model_from_generator()
