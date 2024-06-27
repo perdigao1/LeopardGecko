@@ -1261,8 +1261,13 @@ def train(datavols_list, labels_list):
 
     logging.info("NN1 and NN2 training complete. Don't forget to save model.")
 
-
 def predict(datavols_list):
+    """
+    Alias of of predict_from_data_list()
+    """
+    return predict_from_data_list()
+
+def predict_from_data_list(datavols_list):
     """
     predict, NN1 followed by NN2
 
@@ -1272,10 +1277,15 @@ def predict(datavols_list):
 
     """
     
-    logging.info("predict()")
+    logging.info("predict_from_data_list()")
+    
+    # if input is not a list of volumes, turn to a list with one element
+    data_in =datavols_list
+    if not isinstance(datavols_list,list):
+        raise ValueError("datavols_list is not a list of data")
 
     #Normalise volumes
-    datavols_list0 = normalise_volumes(datavols_list)
+    datavols_list0 = normalise_volumes(data_in)
 
     #Creates a temporary folder (will delete after leaving this function!)
     tempdir_pred= tempfile.TemporaryDirectory()
@@ -1288,6 +1298,40 @@ def predict(datavols_list):
 
     return nn2_preds
 
+def predict_single(datavol):
+    """
+    predict, NN1 followed by NN2
+
+    Works with a single 3D data volume
+
+    """
+    logging.info("predict_single()")
+
+    if isinstance(datavol, list):
+        raise ValueError("datavol is a list. You should use predict_from_data_list() instead")
+    
+    logging.info(f"datavol.shape:{datavol.shape}")
+
+    # if input is not a list of volumes, turn to a list with one element
+    data_in = [datavol]
+
+    #Normalise volumes
+    datavols_list0 = normalise_volumes(data_in)
+
+    #Creates a temporary folder (will delete after leaving this function!)
+    tempdir_pred= tempfile.TemporaryDirectory()
+    path_out_results = Path(tempdir_pred.name)
+    logging.info(f"tempdir_pred_path:{path_out_results}")
+
+
+    nn1_prediction_df = predict_nn1(datavols_list0, path_out_results)
+
+    nn2_preds = predict_nn2_from_pd(nn1_prediction_df)
+
+    if len(nn2_preds)!=1:
+        raise ValueError("Result nn2_preds does not have a single element")
+
+    return nn2_preds[0]
 
 def save_lgsegm2_model(fn_out):
     """
