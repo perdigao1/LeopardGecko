@@ -753,7 +753,7 @@ def predict_nn1_slices_along_axis_1(datavol, axis):
     #with pred_oriented note that class probability is at the start
     return pred_oriented, labels_oriented
 
-
+last_nn1_prediction_df = None
 def predict_nn1(data_to_predict_l, path_out_results):
 
     """
@@ -779,6 +779,8 @@ def predict_nn1(data_to_predict_l, path_out_results):
     eg: along axis Z will be specified as YX
 
     """
+    global last_nn1_prediction_df
+
     logging.info("predict_NN1()")
     pred_data_probs_filenames=[] #Will store results in files, and keep the filenames as reference
     pred_data_labels_filenames=[]
@@ -881,6 +883,8 @@ def predict_nn1(data_to_predict_l, path_out_results):
         'pred_shapes': pred_shapes,
     })
 
+    last_nn1_prediction_df = all_pred_pd
+    
     return all_pred_pd
 
 
@@ -1023,7 +1027,7 @@ nn2_max_lr = 5e-2
 last_train_nn2_progress = None
 def train_nn2(data_all_np6d, trainlabels_list):
     """
-    data_all_np5d: per voxel per class probabilites of predictions.
+    data_all_np6d: per voxel per class probabilites of predictions.
     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
 
     Typical shape from one datavolume 256x256x256 prediction,
@@ -1243,16 +1247,18 @@ def train(datavols_list, labels_list):
     logging.info(f"tempdir_pred_path:{path_out_results}")
 
     res_pds = predict_nn1(datavols_list0, path_out_results)
+    logging.info("Predict_nn1 complete. This is the resulting dataframe")
+    logging.info(str(res_pds))
 
     logging.info("Passing the predicitons to NN2 for training")
 
-    data_all_np5d = aggregate_data_from_pd(res_pds)
+    data_all_np6d = aggregate_data_from_pd(res_pds)
 
-    train_nn2(data_all_np5d, labels_list)
+    train_nn2(data_all_np6d, labels_list)
 
     logging.info("NN1 and NN2 training complete. Don't forget to save model.")
 
-last_nn1_prediction_df = None
+
 def predict(datavols_list):
     """
     predict, NN1 followed by NN2
@@ -1262,8 +1268,7 @@ def predict(datavols_list):
     NN1 predictions dataframe is stored in global variable last_nn1_prediction_df
 
     """
-    global last_nn1_prediction_df
-
+    
     logging.info("predict()")
 
     #Normalise volumes
@@ -1274,9 +1279,9 @@ def predict(datavols_list):
     path_out_results = Path(tempdir_pred.name)
     logging.info(f"tempdir_pred_path:{path_out_results}")
 
-    last_nn1_prediction_df = predict_nn1(datavols_list0, path_out_results)
+    nn1_prediction_df = predict_nn1(datavols_list0, path_out_results)
 
-    nn2_preds = predict_nn2_from_pd(last_nn1_prediction_df)
+    nn2_preds = predict_nn2_from_pd(nn1_prediction_df)
 
     return nn2_preds
 
