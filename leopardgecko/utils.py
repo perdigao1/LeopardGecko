@@ -168,3 +168,27 @@ def map_vol_function_by_blocking(func0, data3d, block_shape, margins_shape):
     logging.info("BLOCK: Completed. Results should be in datares")
     
     return datares
+
+def open_datafile_to_np(fn):
+    """
+    Opens tiff or hdf5 file and returns data contents as numpy ndarray
+    """
+    #Check whether is tif or h5
+
+    fn_path= Path(fn)
+
+    fn_ext = fn_path.suffix
+
+    if "tif" in fn_ext:
+        data = tifffile.imread(str(fn_path))
+        return data
+
+    if "h5" in fn_ext or "hdf" in fn_ext:
+
+        with h5py.File(str(fn_path)) as f:
+            data=np.array(f['data'])
+        return data
+    
+    #TODO: support for other file types?
+    
+    return None
