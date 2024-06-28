@@ -17,6 +17,7 @@ limitations under the License.
 import numpy as np
 #import matplotlib.pyplot as plt #Needed here?
 import dask.array as da
+import torch
 import logging
 
 def MetricScoreOfVols_Accuracy(vol0, vol1, loginfosum=False):
@@ -208,3 +209,60 @@ def MetricScoreOfVols_Dice(vol0, vol1, useBckgnd=False, use_dask=None):
     dicescore_all = np.nanmean(np.array( list(dicescores.values() ) ))
 
     return dicescore_all, dicescores
+
+
+def get_metric_stats_per_class(data_lbls,target, nclasses=None):
+    """
+    Gets true positive, false positive, false negative and true negative sums (tp,fp,fn,tn)
+    for each class
+
+    If nclasses is None (default) then it gets for all the classes based in the maximum
+    value of both data_lbls and target
+
+    Returns:
+    stats_per_class: A list of (tp,fp,fn,tn) values for each class starting at class0
+    [ (tp_0,fp_0,fn_0,tn_0) , (tp_1,fp_1,fn_1,tn_1), ...]
+
+    """
+    
+    if isinstance(data_lbls, np.ndarray):
+        data_lbls = torch.from_numpy(data_lbls)
+
+    if isinstance(target, np.ndarray):
+        target = torch.from_numpy(target)
+    
+    data_flat = torch.ravel(data_lbls)
+    target_flat = torch.ravel(target)
+    
+    #Get max class
+    if nclasses is None:
+        nclasses = max(int(torch.max(data_flat)), int(torch.max(target_flat)) )+1
+        logging.info(f"nclasses:{nclasses}")
+
+    stats_per_class=[]
+    for iclass in range(nclasses):
+        pred_bin = data_flat==iclass
+        gnd_bin =  target_flat==iclass
+        tp = int(torch.sum(torch.bitwise_and(pred_bin,gnd_bin)))
+        tn = int(torch.sum(torch.bitwise_and(torch.bitwise_not(pred_bin),torch.bitwise_not(gnd_bin))))
+        fp = int(torch.sum(torch.bitwise_and(pred_bin,torch.bitwise_not(gnd_bin))))
+        fn = int(torch.sum(torch.bitwise_and(torch.bitwise_not(pred_bin),gnd_bin)))
+        metr_t= (tp,fp,fn,tn)  # Same order as used in SMP get_stats
+        stats_per_class.append(metr_t)
+
+    return stats_per_class
+
+def accuracy_from_stats(tp,fp,fn,tn):
+    return (tp+tn)/(tp+tn+fp+fn)
+
+def iou_from_stats(tp,fp,fn,tn):
+    return tp/(tp+fp+fn)
+
+def f1dice_from_stats(tp,fp,fn,tn):
+    return 2*tp/(2*tp+fp+fn)
+
+def recall_from_stats(tp,fp,fn,tn):
+    return tp/(tp+fn)
+
+def precision_from_stats(tp,fp,fn,tn):
+    return tp/(tp+fp)
