@@ -29,13 +29,11 @@ Most of the stuff here is from /scripts/developing_segmentor2.ipynb
 
 """
 
-
 import numpy as np
-#import dask.array as da
+import dask.array as da
 import tempfile
 from pathlib import Path
-import os
-cwd = os.getcwd()
+
 import tempfile
 import logging
 import pandas as pd
@@ -59,6 +57,7 @@ import logging
 import tifffile
 import h5py
 from tqdm import tqdm
+import random
 
 
 #Default settings
@@ -984,32 +983,55 @@ def update_nn2_model_from_generator():
         nn2_model_fusion = create_nn2_ptmodel_from_class_generator(nn2_MLP_model_class_generator)
         nn2_model_fusion.to(torch_device_str_nn2)
 
-def aggregate_data_from_pd(all_pred_pd):
+def aggregate_data_from_pd(all_pred_df):
+    """
+    Aggregates data from files described in dataframe all_pred_pd
+    It must have the folowing columns
+    pred_data_probs_filenames, pred_sets, pred_ipred, pred_sets
+
+
+
+    """
+
     data_all_np6d=None
 
     logging.debug("Aggregating multiple sets onto a single volume data_all_np5d")
     # aggregate multiple sets for data
-    for i,prow in all_pred_pd.iterrows():
+    dtypes_try = [ "original", "float16"]
 
-        prob_filename = prow['pred_data_probs_filenames']
-        with h5py.File(prob_filename,'r') as f:
-            data0 = np.array(f["data"])
+    for dtype_str in dtypes_try:
+        try:
+            for i,prow in all_pred_df.iterrows():
 
-        if i==0:
-            #initialise
-            logging.info(f"filename:{prob_filename} , shape:{data0.shape}")
-            all_shape0 = (
-                all_pred_pd["pred_sets"].max()+1, # needs to be adjusted
-                all_pred_pd["pred_ipred"].max()+1, # needs to be adjusted, perhaps can be collected from dataframe
-                *data0.shape
-                )
+                prob_filename = prow['pred_data_probs_filenames']
+                with h5py.File(prob_filename,'r') as f:
+                    data0 = np.array(f["data"])
 
-            data_all_np6d=np.zeros( all_shape0 , dtype=data0.dtype)
+                if i==0:
+                    #initialise
+                    logging.info(f"filename:{prob_filename} , shape:{data0.shape}")
+                    all_shape0 = (
+                        all_pred_df["pred_sets"].max()+1, # needs to be adjusted
+                        all_pred_df["pred_ipred"].max()+1, # needs to be adjusted, perhaps can be collected from dataframe
+                        *data0.shape
+                        )
 
-        ipred=prow['pred_ipred']
-        iset=prow['pred_sets']
+                    dtype0 = data0.dtype
+                    if dtype_str=="float16":
+                        dtype0=np.float16
 
-        data_all_np6d[iset,ipred, :,:,:, :] = data0
+                    data_all_np6d=np.zeros( all_shape0 , dtype=dtype0) # Can lead to RAM errors
+
+                ipred=prow['pred_ipred']
+                iset=prow['pred_sets']
+
+                if dtype_str=="original":
+                    data_all_np6d[iset,ipred, :,:,:, :] = data0
+                else:
+                    data_all_np6d[iset,ipred, :,:,:, :] = data0.astype(np.float16)
+                break
+        except Exception as e:
+            logging.error(f"Collecting data using original dtype {dtype0} failed. Falling back to np.float16.")
     
     return data_all_np6d
 
@@ -1029,8 +1051,12 @@ def train_nn2(data_all_np6d, trainlabels_list):
     data_all_np6d: per voxel per class probabilites of predictions.
     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
 
-    Typical shape from one datavolume 256x256x256 prediction,
-    3 class, 12 predictions, (1, 12, 3, 256, 256, 256)
+    Typical shape from S (=1 if only one training volume) prediction datavolumes
+    with shape 256x256x256, 3 class, 12 predictions,
+    (S, 12, 3, 256, 256, 256)
+
+    and corresponding labels as a list with a single int volume with shape (256,256,256)
+    or np.array with shape (S,256,256,256)
 
     """
 
@@ -1058,25 +1084,57 @@ def train_nn2(data_all_np6d, trainlabels_list):
     label_flat_for_mlp = trainlabels_list_np.ravel()
     logging.info(f"label_flat_for_mlp.shape: {label_flat_for_mlp.shape}")
 
-    X_train= torch.from_numpy(data_flat_for_mlp).float()
-    y_train= torch.from_numpy(label_flat_for_mlp).long()
+    # X_train= torch.from_numpy(data_flat_for_mlp).float()
+    # y_train= torch.from_numpy(label_flat_for_mlp).long()
 
     logging.info("Selecting only nn2_ntrain voxel coordinates from data and ground truth for training")
     
-    rand_indices = torch.randperm(X_train.shape[0])
-    subset_indices = rand_indices[:nn2_ntrain]
+    #rand_indices = torch.randperm(X_train.shape[0])
+    #subset_indices = rand_indices[:nn2_ntrain]
 
-    X_train_subset = X_train[subset_indices,:].to(torch_device_str_nn2)
-    y_train_subset = y_train[subset_indices].to(torch_device_str_nn2)
+    # X_train_subset = X_train[subset_indices,:].to(torch_device_str_nn2)
+    # y_train_subset = y_train[subset_indices].to(torch_device_str_nn2)
+
+    logging.info("Using _generate_unique_random_numbers() to generate unique indices")
+    def _generate_unique_random_numbers(num_numbers, min_value, max_value):
+        if num_numbers > max_value - min_value + 1:
+            raise ValueError("Cannot generate more unique numbers than the range allows.")
+
+        unique_numbers = set()
+        while len(unique_numbers) < num_numbers:
+            random_number = random.randint(min_value, max_value)
+            unique_numbers.add(random_number)
+
+        return list(unique_numbers)
+    
+    #test dataset is a quarter of train dataset
+    ntest = int(nn2_ntrain//4)
+    
+    rand_indices = np.array(_generate_unique_random_numbers(nn2_ntrain+ntest,0,data_flat_for_mlp.shape[0]-1))
+
+    assert len(rand_indices) == nn2_ntrain+ntest
+
+    subset_indices=rand_indices[:nn2_ntrain]
+
+    X_train_subset = torch.from_numpy(data_flat_for_mlp[subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
+    y_train_subset = torch.from_numpy(label_flat_for_mlp[subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
+
+    logging.info("X_train_subset and y_train_subset created")
 
     subset_dataset = TensorDataset(X_train_subset, y_train_subset)
     nn2_train_loader = DataLoader(subset_dataset, batch_size=nn2_batch_size, shuffle=True)
 
-    #test dataset is a quarter of train dataset
-    ntest = int(nn2_ntrain//4)
+    logging.info("X_train_subset and y_train_subset created")
+
+    logging.info("Creating test dataset")
+
+    # test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
+    # X_train_subset_test = X_train[test_subset_indices,:].to(torch_device_str_nn2)
+    # y_train_subset_test = y_train[test_subset_indices].to(torch_device_str_nn2)
+
     test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
-    X_train_subset_test = X_train[test_subset_indices,:].to(torch_device_str_nn2)
-    y_train_subset_test = y_train[test_subset_indices].to(torch_device_str_nn2)
+    X_train_subset_test = torch.from_numpy(data_flat_for_mlp[test_subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
+    y_train_subset_test = torch.from_numpy(label_flat_for_mlp[test_subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
     subset_dataset_test = TensorDataset(X_train_subset_test, y_train_subset_test)
     nn2_train_loader_test = DataLoader(subset_dataset_test, batch_size=nn2_batch_size, shuffle=True)
 
@@ -1261,7 +1319,7 @@ def predict(datavols_list):
     """
     Alias of of predict_from_data_list()
     """
-    return predict_from_data_list()
+    return predict_from_data_list(datavols_list)
 
 def predict_from_data_list(datavols_list):
     """
@@ -1271,6 +1329,7 @@ def predict_from_data_list(datavols_list):
 
     NN1 predictions dataframe is stored in global variable last_nn1_prediction_df
 
+    Returns: prediction volume with classes as int values
     """
     
     logging.info("predict_from_data_list()")
