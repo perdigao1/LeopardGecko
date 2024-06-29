@@ -989,7 +989,8 @@ def aggregate_data_from_pd(all_pred_df):
     It must have the folowing columns
     pred_data_probs_filenames, pred_sets, pred_ipred, pred_sets
 
-
+    Returns a an array with th following shape
+    [ iset, ipred (from 0 to 12) , probs , Z ,Y ,X ]
 
     """
 
@@ -1076,8 +1077,8 @@ def train_nn2(data_all_np6d, trainlabels_list):
     if nn2_model_fusion is None:
         raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
 
-    p0 = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2))
-    data_flat_for_mlp = p0.reshape( (np.prod(p0.shape[:4]), p0.shape[4]*p0.shape[5]))
+    p0 = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
+    data_flat_for_mlp = p0.reshape( (np.prod(p0.shape[:4]), p0.shape[4]*p0.shape[5])) # shapesizes [ nset*nZ*nY*nX, npreds*nclasses] with typically npreds=12
     logging.info(f"data_flat_for_mlp.shape: {data_flat_for_mlp.shape}")
 
     trainlabels_list_np = np.array(trainlabels_list)
