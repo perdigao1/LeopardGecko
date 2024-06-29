@@ -1217,20 +1217,40 @@ def predict_nn2_from_pd(all_pred_pd):
             torchdev, batchsize = at0
             try:
                 logging.info(f"Attempting to run NN2 inference on nelements:{nelements} with torchdev:{torchdev} and batchsize:{batchsize}")
-                topred_tc= torch.from_numpy(data_flat_for_mlp).float().to(torchdev)
-                data_tc_ds = TensorDataset(topred_tc)
-                data_tc_batcher = DataLoader(data_tc_ds, batch_size=batchsize, shuffle=False)
-
                 nn2_model_fusion.to(torchdev)
                 nn2_model_fusion.eval()
                 res_s=[]
+
+                # topred_tc= torch.from_numpy(data_flat_for_mlp).float().to(torchdev)
+                # data_tc_ds = TensorDataset(topred_tc)
+                # data_tc_batcher = DataLoader(data_tc_ds, batch_size=batchsize, shuffle=False)
+                # with torch.no_grad():
+                #     logging.info("Beggining NN2 inference of whole volume")
+                #     for data_batch in tqdm(data_tc_batcher):
+                #         #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
+                #         pred = nn2_model_fusion(data_batch[0]) #Can't remember why index 0
+                #         pred_argmax = torch.argmax(pred,dim=1)
+                #         res_s.append(pred_argmax)
+
+                # Not datasets or dataloaders, just plain slicing from numpy to create batches
                 with torch.no_grad():
                     logging.info("Beggining NN2 inference of whole volume")
-                    for data_batch in tqdm(data_tc_batcher):
-                        #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
-                        pred = nn2_model_fusion(data_batch[0])
+
+                    totalsize = data_flat_for_mlp.shape[0]
+                    for idx in tqdm(range(0, totalsize, batchsize)):
+                        id_end =  idx+batchsize
+                        if id_end>totalsize:
+                            id_end=totalsize
+
+                        data_batch_np = data_flat_for_mlp[idx:id_end,...]
+
+                        data_batch = torch.from_numpy(data_batch_np).float().to(torchdev)
+
+                        pred = nn2_model_fusion(data_batch)
+
                         pred_argmax = torch.argmax(pred,dim=1)
                         res_s.append(pred_argmax)
+                
                 b_succeed=True
             except Exception as e:
                 logging.error(f"Error occured, the following exception was throuwn. {str(e)}")
