@@ -1052,12 +1052,12 @@ def train_nn2(data_all_np6d, trainlabels_list):
     data_all_np6d: per voxel per class probabilites of predictions.
     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
 
-    Typical shape from S (=1 if only one training volume) prediction datavolumes
+    Typical shape from nsets (=1 if only one training volume) prediction datavolumes
     with shape 256x256x256, 3 class, 12 predictions,
-    (S, 12, 3, 256, 256, 256)
+    (nsets, 12, 3, 256, 256, 256)
 
     and corresponding labels as a list with a single int volume with shape (256,256,256)
-    or np.array with shape (S,256,256,256)
+    or np.array with shape (nsets,256,256,256)
 
     """
 
@@ -1077,13 +1077,21 @@ def train_nn2(data_all_np6d, trainlabels_list):
     if nn2_model_fusion is None:
         raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
 
-    p0 = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
-    data_flat_for_mlp = p0.reshape( (np.prod(p0.shape[:4]), p0.shape[4]*p0.shape[5])) # shapesizes [ nset*nZ*nY*nX, npreds*nclasses] with typically npreds=12
-    logging.info(f"data_flat_for_mlp.shape: {data_flat_for_mlp.shape}")
+    #test dataset is a quarter of train dataset
+    ntest = int(nn2_ntrain//4)
+
+    data_ordered = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
+
+    # This below can cause out of RAM, because it needs to allocate new RAM for the data
+    # according to the np.reshape help, it will create a new view IF POSSIBLE.
+    # Otherwise it will copy the data
+    # TODO: Create a routine that does not need to copy the whole volume
+    # data_flat_for_mlp = p0.reshape( (np.prod(p0.shape[:4]), p0.shape[4]*p0.shape[5])) # shapesizes [ nset*nZ*nY*nX, npreds*nclasses] with typically npreds=12
+    # logging.info(f"data_flat_for_mlp.shape: {data_flat_for_mlp.shape}")
 
     trainlabels_list_np = np.array(trainlabels_list)
-    label_flat_for_mlp = trainlabels_list_np.ravel()
-    logging.info(f"label_flat_for_mlp.shape: {label_flat_for_mlp.shape}")
+    # label_flat_for_mlp = trainlabels_list_np.ravel()
+    # logging.info(f"label_flat_for_mlp.shape: {label_flat_for_mlp.shape}")
 
     # X_train= torch.from_numpy(data_flat_for_mlp).float()
     # y_train= torch.from_numpy(label_flat_for_mlp).long()
@@ -1096,7 +1104,7 @@ def train_nn2(data_all_np6d, trainlabels_list):
     # X_train_subset = X_train[subset_indices,:].to(torch_device_str_nn2)
     # y_train_subset = y_train[subset_indices].to(torch_device_str_nn2)
 
-    logging.info("Using _generate_unique_random_numbers() to generate unique indices")
+    # logging.info("Using _generate_unique_random_numbers() to generate unique indices")
     def _generate_unique_random_numbers(num_numbers, min_value, max_value):
         if num_numbers > max_value - min_value + 1:
             raise ValueError("Cannot generate more unique numbers than the range allows.")
@@ -1108,36 +1116,99 @@ def train_nn2(data_all_np6d, trainlabels_list):
 
         return list(unique_numbers)
     
-    #test dataset is a quarter of train dataset
-    ntest = int(nn2_ntrain//4)
+    # rand_indices = np.array(_generate_unique_random_numbers(nn2_ntrain+ntest,0,data_flat_for_mlp.shape[0]-1))
+
+    # assert len(rand_indices) == nn2_ntrain+ntest
+
+    # subset_indices=rand_indices[:nn2_ntrain]
+
+    # X_train_subset = torch.from_numpy(data_flat_for_mlp[subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
+    # y_train_subset = torch.from_numpy(label_flat_for_mlp[subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
+
+    # Create X_train_subset and y_train_subset as a torch (.to(torch_device_str_nn2)) object
+    # make sure it is in the format [ nelements, 12*nclasses]
+
+    nelements = np.prod(data_ordered.shape[:4])
+    ninputs = data_ordered.shape[4]*data_ordered.shape[5]
+
+    rand_indices = _generate_unique_random_numbers(nn2_ntrain+ntest, 0, nelements-1)
+
+    #logging.info(f"rand_indices: {rand_indices}")
+
+    #initialise
+    X_train_test_subset = np.zeros( (nn2_ntrain+ntest, ninputs), dtype=np.float32)
+    y_train_test_subset = np.zeros( (nn2_ntrain+ntest) , dtype=np.int16)
+
+    idx_set_Z_Y_X = np.unravel_index( rand_indices, shape = data_ordered.shape[:4] )
+    idx_set_Z_Y_X_t = np.transpose(np.array(idx_set_Z_Y_X))
     
-    rand_indices = np.array(_generate_unique_random_numbers(nn2_ntrain+ntest,0,data_flat_for_mlp.shape[0]-1))
+    #print(f"idx_set_Z_Y_X_t:{idx_set_Z_Y_X_t}")
 
-    assert len(rand_indices) == nn2_ntrain+ntest
+    #idx_set_Z_Y_X_train = idx_set_Z_Y_X_t[:nn2_ntrain]
+    for i, idx0 in enumerate(idx_set_Z_Y_X_t):
+        #print(f"i:{i}, idx0:{idx0}") #debug
+        inp_X = data_ordered[*idx0,:,:].ravel()
+        X_train_test_subset[i,:] = inp_X
 
-    subset_indices=rand_indices[:nn2_ntrain]
+        inp_y = trainlabels_list_np[*idx0] #error
+        y_train_test_subset[i] = inp_y
 
-    X_train_subset = torch.from_numpy(data_flat_for_mlp[subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
-    y_train_subset = torch.from_numpy(label_flat_for_mlp[subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
+    X_train_subset_t = torch.from_numpy(X_train_test_subset[:nn2_ntrain]).to(torch_device_str_nn2)
+    y_train_subset_t = torch.from_numpy(y_train_test_subset[:nn2_ntrain]).long().to(torch_device_str_nn2)
 
-    logging.info("X_train_subset and y_train_subset created")
+    logging.info("X_train_subset_t and y_train_subset_t created")
 
-    subset_dataset = TensorDataset(X_train_subset, y_train_subset)
-    nn2_train_loader = DataLoader(subset_dataset, batch_size=nn2_batch_size, shuffle=True)
+    dataset_X_y_train = TensorDataset(X_train_subset_t, y_train_subset_t)
+    nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, shuffle=True)
 
-    logging.info("X_train_subset and y_train_subset created")
+    logging.info("dataset_X_y_train created")
 
+
+    # test datasets
     logging.info("Creating test dataset")
+    
+    X_test_subset_t = torch.from_numpy(X_train_test_subset[nn2_ntrain:nn2_ntrain+ntest]).to(torch_device_str_nn2)
+    y_test_subset_t = torch.from_numpy(y_train_test_subset[nn2_ntrain:nn2_ntrain+ntest]).long().to(torch_device_str_nn2)
+
+    logging.info("X_test_subset_t and y_test_subset_t created")
+
+    dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
+    nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
+
+    logging.info("dataset_X_y_test created")
+
 
     # test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
     # X_train_subset_test = X_train[test_subset_indices,:].to(torch_device_str_nn2)
     # y_train_subset_test = y_train[test_subset_indices].to(torch_device_str_nn2)
 
-    test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
-    X_train_subset_test = torch.from_numpy(data_flat_for_mlp[test_subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
-    y_train_subset_test = torch.from_numpy(label_flat_for_mlp[test_subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
-    subset_dataset_test = TensorDataset(X_train_subset_test, y_train_subset_test)
-    nn2_train_loader_test = DataLoader(subset_dataset_test, batch_size=nn2_batch_size, shuffle=True)
+    # test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
+    # X_train_subset_test = torch.from_numpy(data_flat_for_mlp[test_subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
+    # y_train_subset_test = torch.from_numpy(label_flat_for_mlp[test_subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
+    # subset_dataset_test = TensorDataset(X_train_subset_test, y_train_subset_test)
+    # nn2_train_loader_test = DataLoader(subset_dataset_test, batch_size=nn2_batch_size, shuffle=True)
+
+    # X_test_subset = np.zeros( (ntest, ninputs), dtype=np.float32)
+    # y_test_subset = np.zeros( (ntest) , dtype=np.int16)
+
+    # idx_set_Z_Y_X_test= idx_set_Z_Y_X_t[nn2_ntrain:nn2_ntrain+ntest]
+    # for i, idx0 in enumerate(idx_set_Z_Y_X_test):
+    #     inp_X = data_ordered[*idx0,:,:].ravel()
+    #     X_test_subset[i,:] = inp_X
+
+    #     inp_y = trainlabels_list_np[*idx0]
+    #     y_test_subset[i] = inp_y
+
+    # logging.info("X_test_subset and y_test_subset created")
+
+    # X_test_subset_t = torch.from_numpy(X_test_subset).to(torch_device_str_nn2)
+    # y_test_subset_t = torch.from_numpy(y_test_subset).to(torch_device_str_nn2)
+
+    # dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
+    # nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
+
+    # logging.info("dataset_X_y_test created")
+
 
     model=nn2_model_fusion
     model.to(torch_device_str_nn2)# ensure is in the correct device
@@ -1164,7 +1235,7 @@ def train_nn2(data_all_np6d, trainlabels_list):
     last_train_nn2_progress = train_model(
         model,
         nn2_train_loader,
-        nn2_train_loader_test, # use train data as test?
+        nn2_test_loader, # use train data as test?
         nn2_loss_func_and_activ,
         optimizer, scaler, scheduler,
         epochs=epochs,
