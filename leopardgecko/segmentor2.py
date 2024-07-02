@@ -30,7 +30,7 @@ Most of the stuff here is from /scripts/developing_segmentor2.ipynb
 """
 
 import numpy as np
-import dask.array as da
+#import dask.array as da
 import tempfile
 from pathlib import Path
 
@@ -54,10 +54,11 @@ import matplotlib.pyplot as plt
 import logging
 #logging.basicConfig(level=logging.INFO)
 
-import tifffile
+#import tifffile
 import h5py
 from tqdm import tqdm
 import random
+import gc
 
 
 #Default settings
@@ -996,45 +997,109 @@ def aggregate_data_from_pd(all_pred_df):
 
     data_all_np6d=None
 
-    logging.debug("Aggregating multiple sets onto a single volume data_all_np5d")
+    logging.debug("Aggregating multiple sets onto a single volume data_all_np6d")
     # aggregate multiple sets for data
     dtypes_try = [ "original", "float16"]
 
-    for dtype_str in dtypes_try:
-        try:
-            for i,prow in all_pred_df.iterrows():
+    for i,prow in all_pred_df.iterrows():
 
-                prob_filename = prow['pred_data_probs_filenames']
-                with h5py.File(prob_filename,'r') as f:
-                    data0 = np.array(f["data"])
+        prob_filename = prow['pred_data_probs_filenames']
+        with h5py.File(prob_filename,'r') as f:
+            data0 = np.array(f["data"])
 
-                if i==0:
-                    #initialise
-                    logging.info(f"filename:{prob_filename} , shape:{data0.shape}")
-                    all_shape0 = (
-                        all_pred_df["pred_sets"].max()+1, # needs to be adjusted
-                        all_pred_df["pred_ipred"].max()+1, # needs to be adjusted, perhaps can be collected from dataframe
-                        *data0.shape
-                        )
+        if i==0:
+            #initialise
+            logging.info(f"filename:{prob_filename} , shape:{data0.shape}")
+            all_shape0 = (
+                all_pred_df["pred_sets"].max()+1, # needs to be adjusted
+                all_pred_df["pred_ipred"].max()+1, # needs to be adjusted, perhaps can be collected from dataframe
+                *data0.shape
+                )
 
-                    dtype0 = data0.dtype
-                    if dtype_str=="float16":
-                        dtype0=np.float16
+            success=False
+            for dtype_str in dtypes_try:
+                
+                dtype0 = data0.dtype
+                if dtype_str=="float16":
+                    dtype0=np.float16
 
+                logging.info(f"dtype_str:{dtype_str}, dtype0:{dtype0}")
+
+                try:
                     data_all_np6d=np.zeros( all_shape0 , dtype=dtype0) # Can lead to RAM errors
+                    success=True
+                except Exception as e:
+                    logging.error(f"Setting up data container using dtype {dtype0} failed with error:{str(e)}.")
+                    
+            if not success:
+                raise RuntimeError("Could not create array to aggregate data.")
 
-                ipred=prow['pred_ipred']
-                iset=prow['pred_sets']
+        ipred=prow['pred_ipred']
+        iset=prow['pred_sets']
 
-                if dtype_str=="original":
-                    data_all_np6d[iset,ipred, :,:,:, :] = data0
-                else:
-                    data_all_np6d[iset,ipred, :,:,:, :] = data0.astype(np.float16)
-                break
-        except Exception as e:
-            logging.error(f"Collecting data using original dtype {dtype0} failed. Falling back to np.float16.")
-    
+        if dtype_str=="original":
+            data_all_np6d[iset,ipred, :,:,:, :] = data0
+        else:
+            data_all_np6d[iset,ipred, :,:,:, :] = data0.astype(np.float16)
+        break
+
+
     return data_all_np6d
+
+def aggregate_data_from_pd_iset(all_pred_df, iset=0):
+    """
+    Aggregates data from files described in dataframe all_pred_pd
+    Only for the iset value provided (default=0)
+
+    all_pred_df dataframe must have the folowing columns
+    pred_data_probs_filenames, pred_sets, pred_ipred, pred_sets
+
+    Returns a an array with th following shape (5D)
+    [ ipred (from 0 to 12) , probs , Z ,Y ,X ]
+
+    Data read from pd df is converted immediately to float16 to save RAM
+    """
+
+    data_all_np5d=None
+
+    logging.info(f"aggregate_data_from_pd_iset() with iset:{iset}")
+
+    #res_pd.loc[res_pd["pred_sets"]==0]
+    # gets only the rows with matching iset value
+    df_iset = all_pred_df.loc[all_pred_df["pred_sets"]==iset]
+
+    for i,prow in df_iset.iterrows(): # Note: i may not start at 0
+
+        prob_filename = prow['pred_data_probs_filenames']
+        
+        #Load data
+        with h5py.File(prob_filename,'r') as f:
+            #data0 = np.array(f["data"])
+            data0 = np.array(f["data"]).astype(np.float16) #convert here
+
+        #if i==0:
+        if data_all_np5d is None:
+            #initialise
+            logging.info(f"Setting up based on first file filename:{prob_filename} , shape:{data0.shape}")
+            all_shape0 = (
+                all_pred_df["pred_ipred"].max()+1, # needs to be adjusted, perhaps can be collected from dataframe
+                *data0.shape
+                )
+
+            # dtype0 = data0.dtype
+            # logging.info(f"dtype0:{dtype0}")
+
+            #data_all_np5d=np.zeros( all_shape0 , dtype=dtype0) # Can lead to RAM errors
+            data_all_np5d=np.zeros( all_shape0 , dtype=np.float16)
+
+        ipred=prow['pred_ipred']
+        #iset=prow['pred_sets']
+
+        data_all_np5d[ipred, :,:,:, :] = data0
+
+    return data_all_np5d
+
+
 
 
 #nn2_max_iter = 1000
@@ -1258,91 +1323,120 @@ def predict_nn2_from_pd(all_pred_pd):
     """
     logging.info("NN2_predict_from_pd()")
 
-    global torch_device_str_nn2
-
+    nsets = all_pred_pd["pred_sets"].max()+1
+    logging.info(f"nsets: {nsets}")
+    
     #Collect all data and put it in a very large array
-    data_all_np5d = aggregate_data_from_pd(all_pred_pd)
-    logging.info(f"data_all_np5d.shape: {data_all_np5d.shape}")
+    #data_all_np6d = aggregate_data_from_pd(all_pred_pd) # Uses too much RAM and crashes
+    # TODO: Create another alternative that does not crash
 
-    nsets = data_all_np5d.shape[0]
+    #logging.info(f"data_all_np5d.shape: {data_all_np6d.shape}")
+
+
     logging.info(f"nsets: {nsets}")
 
     nn2_preds = []
     for iset in range(nsets):
-        data_4d = data_all_np5d[iset]
-        s = data_4d.shape
-        nelements = int(np.prod(s[2:]))
-        p0= data_4d.reshape( (s[0]*s[1], nelements) )
-        data_flat_for_mlp= p0.transpose((1,0))
+        gc.collect()
+        logging.info(f"iset:{iset}")
 
-        nelements_256 = int(nelements//256)
-        # device and batch sizes, cpu and batch size fallback 
-        attempts = [ #(torch_device_str_nn2, nelements), # Using gpu is slow
-                    ("cpu", nelements_256),
-                    ("cpu", 65535), #Fallback(s)
-                    ("cpu", 4096)
-                    ]
+        #data_5d = data_all_np6d[iset]
+        data_5d = aggregate_data_from_pd_iset(all_pred_pd,iset)
+        logging.info(f"data_all_np5d.shape: {data_5d.shape}")
         
-        res_s=[]
-        b_succeed=False
-        for at0 in attempts:
-            torchdev, batchsize = at0
-            try:
-                logging.info(f"Attempting to run NN2 inference on nelements:{nelements} with torchdev:{torchdev} and batchsize:{batchsize}")
-                nn2_model_fusion.to(torchdev)
-                nn2_model_fusion.eval()
-                res_s=[]
-
-                # topred_tc= torch.from_numpy(data_flat_for_mlp).float().to(torchdev)
-                # data_tc_ds = TensorDataset(topred_tc)
-                # data_tc_batcher = DataLoader(data_tc_ds, batch_size=batchsize, shuffle=False)
-                # with torch.no_grad():
-                #     logging.info("Beggining NN2 inference of whole volume")
-                #     for data_batch in tqdm(data_tc_batcher):
-                #         #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
-                #         pred = nn2_model_fusion(data_batch[0]) #Can't remember why index 0
-                #         pred_argmax = torch.argmax(pred,dim=1)
-                #         res_s.append(pred_argmax)
-
-                # Not datasets or dataloaders, just plain slicing from numpy to create batches
-                with torch.no_grad():
-                    logging.info("Beggining NN2 inference of whole volume")
-
-                    totalsize = data_flat_for_mlp.shape[0]
-                    for idx in tqdm(range(0, totalsize, batchsize)):
-                        id_end =  idx+batchsize
-                        if id_end>totalsize:
-                            id_end=totalsize
-
-                        data_batch_np = data_flat_for_mlp[idx:id_end,...]
-
-                        data_batch = torch.from_numpy(data_batch_np).float().to(torchdev)
-
-                        pred = nn2_model_fusion(data_batch)
-
-                        pred_argmax = torch.argmax(pred,dim=1)
-                        res_s.append(pred_argmax)
-                
-                b_succeed=True
-            except Exception as e:
-                logging.error(f"Error occured, the following exception was throuwn. {str(e)}")
-            
-            if b_succeed:
-                break
-        else:
-            # This will run if the for loop did not encounter a break
-            # which will happend in case of no success in running the inference
-            raise RuntimeError(f"Could not run inference with NN2.")
-        
-        r0 = torch.concatenate(res_s) #Collect all inference batches to a singly flattened array
-        r2 = r0.detach().cpu().numpy().astype(np.uint8).reshape(*s[2:])
+        r2 = nn2_predict_single_vol(data_5d)
         logging.info(f"iset:{iset}, nn2 prediction shape:{r2.shape}")
 
         nn2_preds.append(r2)
-    
-    logging.info("NN2 prediction complete.")
+        
+        logging.info("NN2 predictions complete.")
+
+        gc.collect()
+
+    #del(data_all_np6d)
 
     return nn2_preds
+
+def nn2_predict_single_vol(data_5d):
+    """
+    Runs predictions from a datavolume, with shape (pred, class, Z,Y,X)
+
+    returns: prediction as a volume (Z,Y,X), and with np.uint8 data type
+    """
+    logging.info("nn2_predict_single_vol()")
+
+    global torch_device_str_nn2
+    assert data_5d.ndim == 5
+
+    s = data_5d.shape
+    nelements = int(np.prod(s[2:]))
+    p0= data_5d.reshape( (s[0]*s[1], nelements) )
+    data_flat_for_mlp= p0.transpose((1,0))
+
+    nelements_256 = int(nelements//256)
+    # device and batch sizes, cpu and batch size fallback 
+    batchsize_attempts = [ #(torch_device_str_nn2, nelements), # Using gpu is slow
+                ("cpu", nelements_256),
+                ("cpu", 65535), #Fallback(s)
+                ("cpu", 4096)
+                ]
+    
+    res_s=[]
+    b_succeed=False
+    for at0 in batchsize_attempts:
+        torchdev, batchsize = at0
+        try:
+            logging.info(f"Attempting to run NN2 inference on nelements:{nelements} with torchdev:{torchdev} and batchsize:{batchsize}")
+            nn2_model_fusion.to(torchdev)
+            nn2_model_fusion.eval()
+            res_s=[]
+
+            # topred_tc= torch.from_numpy(data_flat_for_mlp).float().to(torchdev)
+            # data_tc_ds = TensorDataset(topred_tc)
+            # data_tc_batcher = DataLoader(data_tc_ds, batch_size=batchsize, shuffle=False)
+            # with torch.no_grad():
+            #     logging.info("Beggining NN2 inference of whole volume")
+            #     for data_batch in tqdm(data_tc_batcher):
+            #         #res= torch.squeeze(mlp_model(data_multi_preds_probs_np))
+            #         pred = nn2_model_fusion(data_batch[0]) #Can't remember why index 0
+            #         pred_argmax = torch.argmax(pred,dim=1)
+            #         res_s.append(pred_argmax)
+
+            # Not datasets or dataloaders, just plain slicing from numpy to create batches
+            with torch.no_grad():
+                logging.info("Beggining NN2 inference of whole volume")
+
+                totalsize = data_flat_for_mlp.shape[0]
+                for idx in tqdm(range(0, totalsize, batchsize)):
+                    id_end =  idx+batchsize
+                    if id_end>totalsize:
+                        id_end=totalsize
+
+                    data_batch_np = data_flat_for_mlp[idx:id_end,...]
+
+                    data_batch = torch.from_numpy(data_batch_np).float().to(torchdev)
+
+                    pred = nn2_model_fusion(data_batch)
+
+                    pred_argmax = torch.argmax(pred,dim=1)
+                    res_s.append(pred_argmax)
+            
+            b_succeed=True
+        except Exception as e:
+            logging.error(f"Error occured, the following exception was throuwn. {str(e)}")
+        
+        if b_succeed:
+            break
+    else:
+        # This will run if the for loop did not encounter a break
+        # which will happend in case of no success in running the inference
+        raise RuntimeError(f"Could not run inference with NN2.")
+    
+    r0 = torch.concatenate(res_s) #Collect all inference batches to a singly flattened array
+    r2 = r0.detach().cpu().numpy().astype(np.uint8).reshape(*s[2:])
+
+    return r2
+
 
 def get_func_from_data_vol_norm_process_str():
     logging.info("get_func_from_data_vol_norm_process_str()")
@@ -1440,6 +1534,9 @@ def predict_from_data_list(datavols_list):
     logging.info(f"tempdir_pred_path:{path_out_results}")
 
     nn1_prediction_df = predict_nn1(datavols_list0, path_out_results)
+
+    #Clear RAM before next stage
+    gc.collect()
 
     nn2_preds = predict_nn2_from_pd(nn1_prediction_df)
 
