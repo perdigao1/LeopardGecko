@@ -16,10 +16,12 @@ limitations under the License.
 
 
 import logging
-import h5py
 import numpy as np
 import dask.array as da
 from pathlib import Path
+
+import h5py
+import tifffile
 
 def save_data_to_hdf5(data, file_path, internal_path="/data",**kwargs):
     """

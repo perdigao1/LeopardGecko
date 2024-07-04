@@ -1325,15 +1325,6 @@ def predict_nn2_from_pd(all_pred_pd):
 
     nsets = all_pred_pd["pred_sets"].max()+1
     logging.info(f"nsets: {nsets}")
-    
-    #Collect all data and put it in a very large array
-    #data_all_np6d = aggregate_data_from_pd(all_pred_pd) # Uses too much RAM and crashes
-    # TODO: Create another alternative that does not crash
-
-    #logging.info(f"data_all_np5d.shape: {data_all_np6d.shape}")
-
-
-    logging.info(f"nsets: {nsets}")
 
     nn2_preds = []
     for iset in range(nsets):
@@ -1353,13 +1344,12 @@ def predict_nn2_from_pd(all_pred_pd):
 
         gc.collect()
 
-    #del(data_all_np6d)
-
     return nn2_preds
 
 def nn2_predict_single_vol(data_5d):
     """
-    Runs predictions from a datavolume, with shape (pred, class, Z,Y,X)
+    Runs nn2 predictions (MLP fusion) from a datavolume,
+    with shape (pred, class, Z,Y,X)
 
     returns: prediction as a volume (Z,Y,X), and with np.uint8 data type
     """
@@ -1744,3 +1734,86 @@ def quick_new_and_train_single_unet_for_all_axis(datavols_list, labels_list):
     train(datavols_list, labels_list)
 
     logging.info("Training complete")
+
+def fuse_max_prob(data_5d ):
+    """
+    Fuse several prediction probability volumes to labels
+    using maximum probability
+
+    data_5d must have typical shape format of (pred, class, Z,Y,X)
+
+    Returns: a volume with uint8 values corresponding to the
+    prediction class number for each voxel
+    
+    """
+    data_reduced_along_preds_axis = np.max(data_5d, axis=0)
+    # Result will have one axis that disappears, the pred axis
+    # Result shape will be (class, Z,Y,X)
+
+    max_label_vol = np.argmax(data_reduced_along_preds_axis, axis=0)
+    # result shape will be (Z,Y,X)
+
+    return max_label_vol.astype(np.uint8)
+
+def fuse_max_prob_from_pd(all_pred_pd):
+    logging.info("fuse_max_prob_from_pd()")
+
+    nsets = all_pred_pd["pred_sets"].max()+1
+    logging.info(f"nsets: {nsets}")
+
+    nn2_preds = []
+    for iset in range(nsets):
+        gc.collect()
+        logging.info(f"iset:{iset}")
+
+        #data_5d = data_all_np6d[iset]
+        data_5d = aggregate_data_from_pd_iset(all_pred_pd,iset)
+        logging.info(f"data_all_np5d.shape: {data_5d.shape}")
+        
+        r2 = fuse_max_prob(data_5d)
+        logging.info(f"iset:{iset}, max prob fusion result shape:{r2.shape}")
+
+        nn2_preds.append(r2)
+        
+        logging.info("Max probability fusion complete.")
+
+        gc.collect()
+
+    return nn2_preds
+
+
+def predict_from_data_list_using_max_prob_fusion(datavols_list):
+    """
+    Does NN1 predictions followed by fusion
+    but instead of fusing volumes using MLP it simply uses maximum probability
+
+    This emulates the volume-segmantics behaviour
+
+    NN1 followed by max prob fusion to collect label
+
+    Returns: prediction volume with classes as uint8 values
+
+    """
+
+    # if input is not a list of volumes, turn to a list with one element
+    data_in = datavols_list
+    if not isinstance(datavols_list,list):
+        raise ValueError("datavols_list is not a list of data")
+
+    #Normalise volumes
+    datavols_list0 = normalise_volumes(data_in)
+
+    #Creates a temporary folder (will delete after leaving this function!)
+    tempdir_pred= tempfile.TemporaryDirectory()
+    path_out_results = Path(tempdir_pred.name)
+    logging.info(f"tempdir_pred_path:{path_out_results}")
+
+    nn1_prediction_df = predict_nn1(datavols_list0, path_out_results)
+
+    #Clear RAM before next stage
+    gc.collect()
+
+    fusion_preds = fuse_max_prob_from_pd(nn1_prediction_df)
+
+    return fusion_preds
+
