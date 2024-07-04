@@ -1630,8 +1630,7 @@ def train(datavols_list, labels_list):
 
     data_all_np6d = aggregate_data_from_pd(res_pds)
 
-    #train_nn2(data_all_np6d, labels_list)
-    train_nn2_class_balanced(data_all_np6d, labels_list)
+    train_nn2(data_all_np6d, labels_list)
 
     logging.info("NN1 and NN2 training complete. Don't forget to save model.")
 
