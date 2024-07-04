@@ -16,10 +16,6 @@ limitations under the License.
 
 
 """
-TODO:
-- Revise metrics, make them more efficient
-    - use the per-class metrics, and average by counting voxel-wise TP,FP,TN, FN
-- support napari types, dask, xarray ?
 
 
 Major change.
@@ -389,6 +385,8 @@ class NN1_train_input_dataset_along_axes(Dataset):
 
 
 nn1_loss_func_and_activ = None
+nn1_train_CEloss_weights = None
+NN1_LOSS_STRS = ["crossentropyloss", "diceloss"]
 def update_nn1_loss_func_and_activ():
     """
     Updates nn1_loss_func_and_activ based in variable nn1_loss_criterion
@@ -398,10 +396,16 @@ def update_nn1_loss_func_and_activ():
 
     activ = torch.nn.Sigmoid()
     if "crossentropyloss" in nn1_loss_criterion.lower():
-        nn1_loss_func = torch.nn.CrossEntropyLoss().to(torch_device_str) # expects logits!
+
+        #nn1_loss_func = torch.nn.CrossEntropyLoss().to(torch_device_str) # expects logits!
+        if nn2_train_CEloss_weights is None:
+            nn1_loss_func= nn.CrossEntropyLoss().to(torch_device_str)
+        else:
+            weights_tc = torch.Tensor(nn2_train_CEloss_weights).to(torch_device_str)
+            nn1_loss_func=nn.CrossEntropyLoss(weights_tc).to(torch_device_str)
         
         # or can use
-        # nn1_loss_func = torch.nn.functional.cross_entropy(pred_logits, target)
+        # nn1_loss_func = torch.nn.functional.cross_entropy(pred_logits, target) but no weights i think
         
         nn1_loss_func_and_activ= {"func":nn1_loss_func, "activ":activ}
     elif "diceloss" in nn1_loss_criterion.lower():
@@ -1105,7 +1109,7 @@ def aggregate_data_from_pd_iset(all_pred_df, iset=0):
 #nn2_max_iter = 1000
 #nn2_ntrain = 262144 #Number of random voxels to be considered for dataset training nn2
 #nn2_ntrain = 2**17
-nn2_ntrain = 2**16
+nn2_ntrain = 2**18
 
 nn2_train_epochs = 10
 # nn2_train_epochs = 10 #debug
@@ -1115,7 +1119,69 @@ nn2_max_lr = 5e-2
 #nn2_loss_func_and_activ=None
 
 last_train_nn2_progress = None
+
+nn2_train_do_class_balance= False
+nn2_ntrain_in_class_balance = 2**16
+
+nn2_train_CEloss_weights = None # Weights for the cross entropy loss function as a list
+
 def train_nn2(data_all_np6d, trainlabels_list):
+
+    if nn2_train_do_class_balance:
+        return train_nn2_class_balanced(data_all_np6d, trainlabels_list)
+
+    return train_nn2_default(data_all_np6d, trainlabels_list)
+
+
+def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
+
+    global nn2_train_epochs
+    global nn2_model_fusion
+    global nn2_batch_size
+    global nn2_lr
+    global nn2_max_lr
+    #global nn2_loss_func_and_activ
+    global torch_device_str_nn2
+    global last_train_nn2_progress
+
+    model=nn2_model_fusion
+    model.to(torch_device_str_nn2)# ensure is in the correct device
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=nn2_lr)
+    scaler=torch.cuda.amp.GradScaler() # Does not work with CPU tensors!!
+
+    epochs = nn2_train_epochs
+    #epochs = 10
+
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr= nn2_max_lr,
+        steps_per_epoch=len(nn2_train_loader),
+        epochs=epochs,
+        #pct_start=0.1, #default=0.3
+        )
+    if nn2_train_CEloss_weights is None:
+        nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss().to(torch_device_str_nn2), "activ":None}
+    else:
+        weights_tc = torch.Tensor(nn2_train_CEloss_weights).to(torch_device_str_nn2) #convert to tensor
+        nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss(weights_tc).to(torch_device_str_nn2), "activ":None}
+
+    logging.info("Beggining training NN2.")
+
+    last_train_nn2_progress = train_model(
+        model,
+        nn2_train_loader,
+        nn2_test_loader, # use train data as test?
+        nn2_loss_func_and_activ,
+        optimizer, scaler, scheduler,
+        epochs=epochs,
+        metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
+    )
+
+    logging.info("Training NN2 complete.")
+
+
+def train_nn2_default(data_all_np6d, trainlabels_list):
     """
     data_all_np6d: per voxel per class probabilites of predictions.
     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
@@ -1133,13 +1199,7 @@ def train_nn2(data_all_np6d, trainlabels_list):
 
     global nn2_model_fusion
     global nn2_ntrain
-    global nn2_train_epochs
-    global nn2_batch_size
-    global nn2_lr
-    global nn2_max_lr
-    global nn2_loss_func_and_activ
     global torch_device_str_nn2
-    global last_train_nn2_progress
 
     logging.info(f"NN2_train()")
     logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
@@ -1247,72 +1307,7 @@ def train_nn2(data_all_np6d, trainlabels_list):
 
     logging.info("dataset_X_y_test created")
 
-
-    # test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
-    # X_train_subset_test = X_train[test_subset_indices,:].to(torch_device_str_nn2)
-    # y_train_subset_test = y_train[test_subset_indices].to(torch_device_str_nn2)
-
-    # test_subset_indices = rand_indices[nn2_ntrain:nn2_ntrain+ntest]
-    # X_train_subset_test = torch.from_numpy(data_flat_for_mlp[test_subset_indices,:].astype(np.float32)).to(torch_device_str_nn2)
-    # y_train_subset_test = torch.from_numpy(label_flat_for_mlp[test_subset_indices].astype(np.int16)).long().to(torch_device_str_nn2)
-    # subset_dataset_test = TensorDataset(X_train_subset_test, y_train_subset_test)
-    # nn2_train_loader_test = DataLoader(subset_dataset_test, batch_size=nn2_batch_size, shuffle=True)
-
-    # X_test_subset = np.zeros( (ntest, ninputs), dtype=np.float32)
-    # y_test_subset = np.zeros( (ntest) , dtype=np.int16)
-
-    # idx_set_Z_Y_X_test= idx_set_Z_Y_X_t[nn2_ntrain:nn2_ntrain+ntest]
-    # for i, idx0 in enumerate(idx_set_Z_Y_X_test):
-    #     inp_X = data_ordered[*idx0,:,:].ravel()
-    #     X_test_subset[i,:] = inp_X
-
-    #     inp_y = trainlabels_list_np[*idx0]
-    #     y_test_subset[i] = inp_y
-
-    # logging.info("X_test_subset and y_test_subset created")
-
-    # X_test_subset_t = torch.from_numpy(X_test_subset).to(torch_device_str_nn2)
-    # y_test_subset_t = torch.from_numpy(y_test_subset).to(torch_device_str_nn2)
-
-    # dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
-    # nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
-
-    # logging.info("dataset_X_y_test created")
-
-
-    model=nn2_model_fusion
-    model.to(torch_device_str_nn2)# ensure is in the correct device
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=nn2_lr)
-    scaler=torch.cuda.amp.GradScaler() # Does not work with CPU tensors!!
-
-    epochs = nn2_train_epochs
-    #epochs = 10
-
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr= nn2_max_lr,
-        steps_per_epoch=len(nn2_train_loader),
-        epochs=epochs,
-        #pct_start=0.1, #default=0.3
-        )
-
-    nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss(), "activ":None}
-    # activ = torch.nn.Sigmoid() we may need this
-
-    logging.info("Beggining training NN2.")
-
-    last_train_nn2_progress = train_model(
-        model,
-        nn2_train_loader,
-        nn2_test_loader, # use train data as test?
-        nn2_loss_func_and_activ,
-        optimizer, scaler, scheduler,
-        epochs=epochs,
-        metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
-    )
-
-    logging.info("Training NN2 complete.")
+    _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader)
 
 
 def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
@@ -1330,18 +1325,13 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
     """
 
     global nn2_model_fusion
-    global nn2_ntrain
-    global nn2_train_epochs
-    global nn2_batch_size
-    global nn2_lr
-    global nn2_max_lr
-    global nn2_loss_func_and_activ
+    #global nn2_ntrain
     global torch_device_str_nn2
-    global last_train_nn2_progress
+    global nn2_ntrain_in_class_balance
 
     logging.info(f"train_nn2_class_balanced()")
     logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
-    logging.info(f"nn2_ntrain:{nn2_ntrain}")#
+    logging.info(f"nn2_ntrain_in_class_balance:{nn2_ntrain_in_class_balance}")#
 
     if nn2_model_fusion is None:
         raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
@@ -1358,7 +1348,7 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
     logging.info("Adjusting number of elements.")
 
 
-    nfrac = nn2_ntrain // (4*nclasses)
+    nfrac = nn2_ntrain_in_class_balance // (4*nclasses)
 
     max_items_per_class = 5*nfrac
     
@@ -1378,7 +1368,7 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
     logging.info(f"max_items_per_class: {max_items_per_class}, ntotal (adjusted):{ntotal}")
 
 
-    logging.info("Selecting only nn2_ntrain voxel coordinates from data and ground truth for training by balancing class labels.")
+    logging.info("Selecting only nn2_ntrain_in_class_balance voxel coordinates from data and ground truth for training by balancing class labels.")
 
     nvoxels = np.prod(data_ordered.shape[:4])
     ninputs = data_ordered.shape[4]*data_ordered.shape[5]
@@ -1459,39 +1449,7 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
 
     logging.info("dataset_X_y_test created")
 
-    model=nn2_model_fusion
-    model.to(torch_device_str_nn2)# ensure is in the correct device
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=nn2_lr)
-    scaler=torch.cuda.amp.GradScaler() # Does not work with CPU tensors!!
-
-    epochs = nn2_train_epochs
-    #epochs = 10
-
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr= nn2_max_lr,
-        steps_per_epoch=len(nn2_train_loader),
-        epochs=epochs,
-        #pct_start=0.1, #default=0.3
-        )
-
-    nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss(), "activ":None}
-    # activ = torch.nn.Sigmoid() we may need this
-
-    logging.info("Beggining training NN2.")
-
-    last_train_nn2_progress = train_model(
-        model,
-        nn2_train_loader,
-        nn2_test_loader, # use train data as test?
-        nn2_loss_func_and_activ,
-        optimizer, scaler, scheduler,
-        epochs=epochs,
-        metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
-    )
-
-    logging.info("Training NN2 complete.")
+    _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader)
 
 
 
@@ -1770,15 +1728,20 @@ nn1_eval_metric: {nn1_eval_metric}
 nn1_lr: {nn1_lr}
 nn1_max_lr: {nn1_max_lr}
 nn1_train_epochs: {nn1_train_epochs}
+nn1_train_CEloss_weights: {nn1_train_CEloss_weights}
 
-nn1_batch_size = 2
-nn1_num_workers = 1
+nn1_batch_size = {nn1_batch_size}
+nn1_num_workers = {nn1_num_workers}
 
 nn2_ntrain: {nn2_ntrain}
 nn2_train_epochs: {nn2_train_epochs}
 nn2_batch_size: {nn2_batch_size}
 nn2_lr: {nn2_lr}
 nn2_max_lr: {nn2_max_lr}
+nn2_train_do_class_balance: {nn2_train_do_class_balance}
+nn2_ntrain_in_class_balance: {nn2_ntrain_in_class_balance}
+nn2_train_CEloss_weights: {nn2_train_CEloss_weights}
+
 """
     
     dict_to_save={
