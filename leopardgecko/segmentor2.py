@@ -1103,7 +1103,10 @@ def aggregate_data_from_pd_iset(all_pred_df, iset=0):
 
 
 #nn2_max_iter = 1000
-nn2_ntrain = 262144 #Number of random voxels to be considered for dataset training nn2
+#nn2_ntrain = 262144 #Number of random voxels to be considered for dataset training nn2
+#nn2_ntrain = 2**17
+nn2_ntrain = 2**16
+
 nn2_train_epochs = 10
 # nn2_train_epochs = 10 #debug
 nn2_batch_size = 4096
@@ -1125,6 +1128,8 @@ def train_nn2(data_all_np6d, trainlabels_list):
     or np.array with shape (nsets,256,256,256)
 
     """
+    # TODO: This training is not great for labels that are sparse.
+    # Try to balance classes
 
     global nn2_model_fusion
     global nn2_ntrain
@@ -1310,6 +1315,186 @@ def train_nn2(data_all_np6d, trainlabels_list):
     logging.info("Training NN2 complete.")
 
 
+def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
+    """
+    data_all_np6d: per voxel per class probabilites of predictions.
+    This can be collected using aggregate_data_from_pd() with output from predict_nn1()
+
+    Typical shape from nsets (=1 if only one training volume) prediction datavolumes
+    with shape 256x256x256, 3 class, 12 predictions,
+    (nsets, 12, 3, 256, 256, 256)
+
+    and corresponding labels as a list with a single int volume with shape (256,256,256)
+    or np.array with shape (nsets,256,256,256)
+
+    """
+
+    global nn2_model_fusion
+    global nn2_ntrain
+    global nn2_train_epochs
+    global nn2_batch_size
+    global nn2_lr
+    global nn2_max_lr
+    global nn2_loss_func_and_activ
+    global torch_device_str_nn2
+    global last_train_nn2_progress
+
+    logging.info(f"train_nn2_class_balanced()")
+    logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
+    logging.info(f"nn2_ntrain:{nn2_ntrain}")#
+
+    if nn2_model_fusion is None:
+        raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
+
+    data_ordered = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
+
+    trainlabels_list_np = np.array(trainlabels_list)
+
+    nclasses = np.max(trainlabels_list_np)+1
+    nvoxels_per_class = [ np.count_nonzero( trainlabels_list_np==i ) for i in range(nclasses) ]
+    logging.info(f"nclasses estimated from max: {nclasses}, nvoxels_per_class:{nvoxels_per_class}")
+
+
+    logging.info("Adjusting number of elements.")
+
+
+    nfrac = nn2_ntrain // (4*nclasses)
+
+    max_items_per_class = 5*nfrac
+    
+    thrs_vox_per_class = np.array(nvoxels_per_class)//16
+
+    if np.any( thrs_vox_per_class < max_items_per_class):
+        logging.info(f"Some thrs_vox_per_class {thrs_vox_per_class} are smaller than max_items_per_class {max_items_per_class}")
+        nfrac = np.min(thrs_vox_per_class)//5
+        max_items_per_class= 5*nfrac
+        logging.info(f"Adjusting max_items_per_class to {max_items_per_class}")
+    
+    #Re-Adjusts
+    ntrain = nfrac*4*nclasses
+    ntest = nfrac*nclasses #test dataset is a quarter of train dataset
+    ntotal = ntrain+ntest
+
+    logging.info(f"max_items_per_class: {max_items_per_class}, ntotal (adjusted):{ntotal}")
+
+
+    logging.info("Selecting only nn2_ntrain voxel coordinates from data and ground truth for training by balancing class labels.")
+
+    nvoxels = np.prod(data_ordered.shape[:4])
+    ninputs = data_ordered.shape[4]*data_ordered.shape[5]
+
+    #initialise
+    X_train_test_subset = np.zeros( (ntotal, ninputs), dtype=np.float32)
+    y_train_test_subset = np.zeros( (ntotal) , dtype=np.int16)
+
+    # Collect datapoints
+
+    #while True: #DANGER
+    count_per_class = np.zeros((nclasses), dtype=np.int64)
+    unique_flat_idxs = []
+    shape0 = data_ordered.shape[:4]
+
+    ielement = 0 #counter
+    with tqdm(total=ntotal) as tqdm_pbar:
+        for i in range(nvoxels): # *10 to impose a timeout, normally it should simply exit with a break
+            
+            random_flat_idx = random.randint(0, nvoxels-1)
+
+            if random_flat_idx not in unique_flat_idxs:
+                #Apply unravel to a single element
+                coord = np.transpose(np.unravel_index( [random_flat_idx], shape0 ))[0]
+
+                # get data point and label
+                inp_X = data_ordered[*coord,:,:].ravel()
+                inp_y = trainlabels_list_np[*coord]
+
+                class_i = int(inp_y)
+
+                if count_per_class[class_i] < max_items_per_class:
+                    #can add this element
+                    count_per_class[class_i]+=1
+                    X_train_test_subset[ielement]=inp_X
+                    y_train_test_subset[ielement]=inp_y
+
+                    # if ielement % 4096 == 100:
+                    #     logging.info(f"ielement: {ielement}, inp_y:{inp_y}, count_per_class:{count_per_class}")
+
+                    ielement+=1
+                    tqdm_pbar.update(1) # update increases by the value speicified
+
+                    unique_flat_idxs.append(random_flat_idx)
+                
+                if ielement>= ntotal:
+                    logging.info(f"Reached ielement>= ntotal : {ielement}>={ntotal}. Exiting for loop")
+                    break
+
+        else:
+            #Reach the end of the loop, number of elements should be adusted or just throw error
+            raise OverflowError(f"Reached the end of loop without collecting enough data points. count_per_class:{count_per_class}")
+
+    assert len(unique_flat_idxs)==ntotal
+
+    logging.info(f"count_per_class:{count_per_class}")
+
+    X_train_subset_t = torch.from_numpy(X_train_test_subset[:ntrain]).to(torch_device_str_nn2)
+    y_train_subset_t = torch.from_numpy(y_train_test_subset[:ntrain]).long().to(torch_device_str_nn2)
+
+    logging.info("X_train_subset_t and y_train_subset_t created")
+
+    dataset_X_y_train = TensorDataset(X_train_subset_t, y_train_subset_t)
+    nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, shuffle=True)
+
+    logging.info("dataset_X_y_train created")
+
+    # test datasets
+    logging.info("Creating test dataset")
+    
+    X_test_subset_t = torch.from_numpy(X_train_test_subset[ntrain:ntrain+ntest]).to(torch_device_str_nn2)
+    y_test_subset_t = torch.from_numpy(y_train_test_subset[ntrain:ntrain+ntest]).long().to(torch_device_str_nn2)
+
+    logging.info("X_test_subset_t and y_test_subset_t created")
+
+    dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
+    nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
+
+    logging.info("dataset_X_y_test created")
+
+    model=nn2_model_fusion
+    model.to(torch_device_str_nn2)# ensure is in the correct device
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=nn2_lr)
+    scaler=torch.cuda.amp.GradScaler() # Does not work with CPU tensors!!
+
+    epochs = nn2_train_epochs
+    #epochs = 10
+
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr= nn2_max_lr,
+        steps_per_epoch=len(nn2_train_loader),
+        epochs=epochs,
+        #pct_start=0.1, #default=0.3
+        )
+
+    nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss(), "activ":None}
+    # activ = torch.nn.Sigmoid() we may need this
+
+    logging.info("Beggining training NN2.")
+
+    last_train_nn2_progress = train_model(
+        model,
+        nn2_train_loader,
+        nn2_test_loader, # use train data as test?
+        nn2_loss_func_and_activ,
+        optimizer, scaler, scheduler,
+        epochs=epochs,
+        metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
+    )
+
+    logging.info("Training NN2 complete.")
+
+
+
 def predict_nn2_from_pd(all_pred_pd):
     """
     Runs NN2 fusion predictions(inference) from several probabiliy data volumes
@@ -1487,7 +1672,8 @@ def train(datavols_list, labels_list):
 
     data_all_np6d = aggregate_data_from_pd(res_pds)
 
-    train_nn2(data_all_np6d, labels_list)
+    #train_nn2(data_all_np6d, labels_list)
+    train_nn2_class_balanced(data_all_np6d, labels_list)
 
     logging.info("NN1 and NN2 training complete. Don't forget to save model.")
 
