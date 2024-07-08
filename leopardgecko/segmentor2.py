@@ -158,6 +158,7 @@ def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
 
 NN1_models = None
 nn1_axes_to_models_indices = [0,1,2] #default
+nn1_train_allow_rot90_tfms_per_axis = [True,True,True] #default
 
 def update_nn1_models_from_generators():
     """
@@ -247,13 +248,65 @@ def get_train_augmentations_v0(h,w):
             )
     return tfms0
 
+def get_train_augmentations_v1(h,w, allow90rot=True):
+    # Gets alb augmentations based on image size height x width
+    # Initial RandomSizedCrop resizes to nearest multiple of 32
+
+    def get_nearest_multiple_of_32(v):
+        i32 = v//32
+        return i32*32
+
+    img_h, img_w = h,w
+
+    img_h32, img_w32 = get_nearest_multiple_of_32(img_h),  get_nearest_multiple_of_32(img_w)
+    assert img_h32>0 and img_w>0
+
+    tfm_list = [
+                alb.RandomSizedCrop(
+                    min_max_height= (img_h32//2, img_h32),
+                    height=img_h32,
+                    width=img_w32 ,
+                    p=0.5,
+                ),
+                #Deciding what resizing augmentations is difficult not kowing what
+                # sizes the images can be different
+
+                alb.VerticalFlip(p=0.5),
+                alb.HorizontalFlip(p=0.5),
+    ]
+    
+    if allow90rot:
+        tfm_list.append(alb.RandomRotate90(p=0.5))
+
+
+    tfm_list.expand([
+                # alb.Transpose(p=0.5), too similar to 90 deg rot
+                alb.OneOf(
+                    [
+                        alb.ElasticTransform(
+                            alpha=120, sigma=120 * 0.07, alpha_affine=120 * 0.04, p=0.5
+                        ),
+                        alb.GridDistortion(p=0.5),
+                        alb.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+                    ],
+                    p=0.5,
+                ),
+                alb.CLAHE(p=0.5),
+                alb.OneOf([alb.RandomBrightnessContrast(p=0.5),alb.RandomGamma(p=0.5)], p=0.5),
+                alb.pytorch.ToTensorV2()
+        ]
+    )
+    
+    tfms0 = alb.Compose(tfm_list)
+    return tfms0
+
 class NN1_train_input_dataset_along_axes(Dataset):
     """
     Custom pytorch class for slicing several datavolumes (from list)
-    along a one or a list of axis
+    along one or a list of axis
     This is useful for training
     """
-    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2]):
+    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2], allow90rot_per_axis=[True,True,True]):
         #global torch_device_str
         logging.info(f"NN1_train_input_dataset_along_axes __init__ with len(data):{len(datavols_list)}, axes:{axes}")
 
@@ -291,14 +344,24 @@ class NN1_train_input_dataset_along_axes(Dataset):
                 slice_range = np.arange(0,nslices).tolist()
                 self._idx_to_slicen.extend(slice_range)
 
+                # if ax0==0:
+                #     t0 = get_train_augmentations_v0( *d0[0,:,:].shape )
+                # elif ax0==1:
+                #     t0 = get_train_augmentations_v0( *d0[:,0,:].shape )
+                # elif ax0==2:
+                #     t0 = get_train_augmentations_v0( *d0[:,:,0].shape )
+                # else:
+                #     raise ValueError(f"ax0 {ax0} not valid")
+
                 if ax0==0:
-                    t0 = get_train_augmentations_v0( *d0[0,:,:].shape )
+                    t0 = get_train_augmentations_v1( *d0[0,:,:].shape, allow90rot=allow90rot_per_axis[0])
                 elif ax0==1:
-                    t0 = get_train_augmentations_v0( *d0[:,0,:].shape )
+                    t0 = get_train_augmentations_v1( *d0[:,0,:].shape, allow90rot=allow90rot_per_axis[1])
                 elif ax0==2:
-                    t0 = get_train_augmentations_v0( *d0[:,:,0].shape )
+                    t0 = get_train_augmentations_v1( *d0[:,:,0].shape, allow90rot=allow90rot_per_axis[2] )
                 else:
                     raise ValueError(f"ax0 {ax0} not valid")
+                
                 self._idx_to_tfms.extend([t0]*nslices)
 
         total_slices = len(self._idx_to_item)
@@ -572,9 +635,13 @@ def train_nn1(traindata_list, trainlabels_list):
     global nn1_batch_size
     global last_train_nn1_progress
     global nn1_train_epochs
+    global nn1_train_allow_rot90_tfms_per_axis
 
     if NN1_models is None:
         raise ValueError("No NN1 models to train")
+    
+    if len(nn1_train_allow_rot90_tfms_per_axis)!=3:
+        raise ValueError("nn1_train_allow_rot90_tfms_per_axis should have 3 boolean elements")
     
     #reverse nn1_axes_to_models_indices to get model to axis
     def _reverse(n0):
@@ -590,7 +657,7 @@ def train_nn1(traindata_list, trainlabels_list):
 
     if len(models_to_axis)==0:
         raise ValueError("models_to_axis has no elements")
-    
+
     last_train_nn1_progress={}
     for imodel, axs in enumerate(models_to_axis):
 
@@ -602,10 +669,17 @@ def train_nn1(traindata_list, trainlabels_list):
 
         logging.info("Setting up datasets and dataloaders.")
         # Create dataloaders for training
+        # ds0 = NN1_train_input_dataset_along_axes(
+        #     traindata_list,
+        #     trainlabels_list,
+        #     axes = axs,
+        # )
+
         ds0 = NN1_train_input_dataset_along_axes(
             traindata_list,
             trainlabels_list,
-            axes = axs
+            axes = axs,
+            allow90rot_per_axis= nn1_train_allow_rot90_tfms_per_axis
         )
 
         dset1, dset2 = torch.utils.data.random_split(ds0, [0.8,0.2])
@@ -1728,6 +1802,7 @@ nn1_lr: {nn1_lr}
 nn1_max_lr: {nn1_max_lr}
 nn1_train_epochs: {nn1_train_epochs}
 nn1_train_CEloss_weights: {nn1_train_CEloss_weights}
+nn1_train_allow_rot90_tfms_per_axis: {nn1_train_allow_rot90_tfms_per_axis}
 
 nn1_batch_size = {nn1_batch_size}
 nn1_num_workers = {nn1_num_workers}
@@ -1740,6 +1815,7 @@ nn2_max_lr: {nn2_max_lr}
 nn2_train_do_class_balance: {nn2_train_do_class_balance}
 nn2_ntrain_in_class_balance: {nn2_ntrain_in_class_balance}
 nn2_train_CEloss_weights: {nn2_train_CEloss_weights}
+
 
 """
     
@@ -1807,8 +1883,6 @@ def load_lgsegm2_model(fn):
 
 
 
-
-
 # Shortcut functions to create train and create models
 def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
     global nn1_models_class_generator
@@ -1831,7 +1905,7 @@ def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
     logging.info("Training complete")
 
 
-def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
+def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list, trainYXrot_freeze=False):
     global nn1_models_class_generator
     global nn1_axes_to_models_indices
     global nn2_MLP_model_class_generator
@@ -1840,9 +1914,12 @@ def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
     logging.info("quick_new_and_train_one_unet_model_per_axis")
 
     nn1_models_class_generator= [nn1_dict_gen_default,
-    nn1_dict_gen_default.copy()]
+        nn1_dict_gen_default.copy()]
     
     nn1_axes_to_models_indices = [0,1,1]
+
+    if trainYXrot_freeze:
+        nn1_train_allow_rot90_tfms_per_axis = [True,False,False]
 
     nn2_MLP_model_class_generator= nn2_MLP_model_class_generator_default
     # Default 3 unet models, one per axis. 3 classes
