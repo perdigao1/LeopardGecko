@@ -278,8 +278,8 @@ def get_train_augmentations_v1(h,w, allow90rot=True):
     if allow90rot:
         tfm_list.append(alb.RandomRotate90(p=0.5))
 
-
-    tfm_list.expand([
+    #Could also use the + operator
+    tfm_list.extend([
                 # alb.Transpose(p=0.5), too similar to 90 deg rot
                 alb.OneOf(
                     [
