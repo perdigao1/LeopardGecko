@@ -22,6 +22,7 @@ from pathlib import Path
 
 import h5py
 import tifffile
+from dataclasses import dataclass
 
 def save_data_to_hdf5(data, file_path, internal_path="/data",**kwargs):
     """
@@ -195,6 +196,14 @@ def open_datafile_to_np(fn):
     #TODO: support for other file types?
     
     return None
+
+
+@dataclass
+class cCalcStatus():
+    regions_plan: list
+    #remaining_vols: list
+    regions_completed: list
+    region_to_fn: dict
 
 def map_vol_function_by_blocking_safe(func0, data3d, block_shape, margins_shape, id_str, tmp_folder):
     logging.info(f"map_vol_function_by_blocking_safe()")
