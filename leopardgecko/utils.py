@@ -23,6 +23,7 @@ from pathlib import Path
 import h5py
 import tifffile
 from dataclasses import dataclass
+import pickle
 
 def save_data_to_hdf5(data, file_path, internal_path="/data",**kwargs):
     """
