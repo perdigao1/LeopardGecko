@@ -279,7 +279,7 @@ def map_vol_function_by_blocking_safe(func0, data3d, block_shape, margins_shape,
     for reg0 in calc_status.regions_plan:
         
         if reg0 in calc_status.regions_completed:
-            logging.info(f"Region reg0 already calculated. Skipping")
+            logging.info(f"Region {reg0} already calculated. Skipping")
             continue #skips this volume
         
         iz0,iy0,ix0, iz00,iy00,ix00, iz1,iy1,ix1 = reg0
