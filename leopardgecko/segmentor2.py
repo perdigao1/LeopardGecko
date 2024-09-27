@@ -132,9 +132,9 @@ def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
             model_arch = smp.MAnet
         elif arch=="fpn":
             model_arch = smp.FPN
-        elif "pan" in m:
+        elif "pan" in arch:
             model_arch=smp.PAN
-        elif "pspnet" in m:
+        elif "pspnet" in arch:
             model_arch=smp.PSPNet
         else:
             raise ValueError(f"arch:{arch} not valid.")
@@ -207,6 +207,7 @@ def normalise_voldata_to_stdev_3(datavol):
 def get_train_augmentations_v0(h,w):
     # Gets alb augmentations based on image size height x width
     # Initial RandomSizedCrop resizes to nearest multiple of 32
+    #Deprecating in favour of get_train_augmentations_v1
 
     def get_nearest_multiple_of_32(v):
         i32 = v//32
