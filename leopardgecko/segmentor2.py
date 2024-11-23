@@ -1352,7 +1352,8 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     #idx_set_Z_Y_X_train = idx_set_Z_Y_X_t[:nn2_ntrain]
     for i, idx0 in enumerate(idx_set_Z_Y_X_t):
         #print(f"i:{i}, idx0:{idx0}") #debug
-        inp_X = data_ordered[*idx0,:,:].ravel()
+        #inp_X = data_ordered[*idx0,:,:].ravel() #TODO: invalid synthax
+        inp_X = data_ordered[tuple(idx0),:,:].ravel() #chatgpt solution
         X_train_test_subset[i,:] = inp_X
 
         inp_y = trainlabels_list_np[*idx0] #error
