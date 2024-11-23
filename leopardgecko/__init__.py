@@ -44,7 +44,7 @@ from . import ScoreData, Pcrit, metrics, AvgPool
 from . import hvectstatstools
 from . import hvect_plot_2class, hvect_plot_3class
 
-__version__ = "1.1"
+__version__ = "1.2"
 
 def lizzie():
     '''
