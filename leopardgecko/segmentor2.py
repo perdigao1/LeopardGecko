@@ -1356,7 +1356,8 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
         inp_X = data_ordered[tuple(idx0),:,:].ravel() #chatgpt solution
         X_train_test_subset[i,:] = inp_X
 
-        inp_y = trainlabels_list_np[*idx0] #error
+        #inp_y = trainlabels_list_np[*idx0] #error
+        inp_y = trainlabels_list_np[tuple(idx0)]
         y_train_test_subset[i] = inp_y
 
     X_train_subset_t = torch.from_numpy(X_train_test_subset[:nn2_ntrain]).to(torch_device_str_nn2)
