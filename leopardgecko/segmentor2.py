@@ -1472,8 +1472,10 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
                 coord = np.transpose(np.unravel_index( [random_flat_idx], shape0 ))[0]
 
                 # get data point and label
-                inp_X = data_ordered[*coord,:,:].ravel()
-                inp_y = trainlabels_list_np[*coord]
+                #inp_X = data_ordered[*coord,:,:].ravel()
+                #inp_y = trainlabels_list_np[*coord]
+                inp_X = data_ordered[tuple(coord),:,:].ravel()
+                inp_y = trainlabels_list_np[tuple(coord)]
 
                 class_i = int(inp_y)
 
