@@ -694,7 +694,8 @@ def train_nn1(traindata_list, trainlabels_list):
         #Setup optimizer and scaler
         logging.info("Setting up optimizer and scheduler.")
         optimizer = torch.optim.AdamW(model.parameters(), lr=nn1_lr)
-        scaler=torch.cuda.amp.GradScaler()
+        #scaler=torch.cuda.amp.GradScaler()
+        scaler=torch.amp.GradScaler(torch_device_str)
 
         epochs = nn1_train_epochs #global
         #epochs = 10
@@ -1223,7 +1224,8 @@ def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
     model.to(torch_device_str_nn2)# ensure is in the correct device
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=nn2_lr)
-    scaler=torch.cuda.amp.GradScaler() # Does not work with CPU tensors!!
+    #scaler=torch.cuda.amp.GradScaler() # Does not work with CPU tensors!!
+    scaler=torch.amp.GradScaler(torch_device_str_nn2)
 
     epochs = nn2_train_epochs
     #epochs = 10
@@ -1277,7 +1279,7 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     global torch_device_str_nn2
 
     logging.info(f"NN2_train()")
-    logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
+    logging.info(f"data_all_np6d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
 
     if nn2_model_fusion is None:
         raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
@@ -1286,6 +1288,7 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     ntest = int(nn2_ntrain//4)
 
     data_ordered = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
+    logging.info(f"data_ordered.shape:{data_ordered.shape}")
 
     # This below can cause out of RAM, because it needs to allocate new RAM for the data
     # according to the np.reshape help, it will create a new view IF POSSIBLE.
@@ -1295,6 +1298,7 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     # logging.info(f"data_flat_for_mlp.shape: {data_flat_for_mlp.shape}")
 
     trainlabels_list_np = np.array(trainlabels_list)
+    logging.info(f"trainlabels_list_np.shape: {trainlabels_list_np.shape}")
     # label_flat_for_mlp = trainlabels_list_np.ravel()
     # logging.info(f"label_flat_for_mlp.shape: {label_flat_for_mlp.shape}")
 
@@ -1345,7 +1349,7 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     y_train_test_subset = np.zeros( (nn2_ntrain+ntest) , dtype=np.int16)
 
     idx_set_Z_Y_X = np.unravel_index( rand_indices, shape = data_ordered.shape[:4] )
-    idx_set_Z_Y_X_t = np.transpose(np.array(idx_set_Z_Y_X))
+    idx_set_Z_Y_X_t = np.transpose(np.array(idx_set_Z_Y_X)) #turns into a list of ZYX indices
     
     #print(f"idx_set_Z_Y_X_t:{idx_set_Z_Y_X_t}")
 
@@ -1353,11 +1357,16 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     for i, idx0 in enumerate(idx_set_Z_Y_X_t):
         #print(f"i:{i}, idx0:{idx0}") #debug
         #inp_X = data_ordered[*idx0,:,:].ravel() #TODO: invalid synthax
-        inp_X = data_ordered[tuple(idx0),:,:].ravel() #chatgpt solution
+        #inp_X = data_ordered[tuple(idx0),:,:].ravel() #chatgpt solution doesn't work
+        
+        iset,Z,Y,X = idx0
+        inp_X = data_ordered[iset,Z,Y,X,:,:].ravel()
+
         X_train_test_subset[i,:] = inp_X
 
         #inp_y = trainlabels_list_np[*idx0] #error
-        inp_y = trainlabels_list_np[tuple(idx0)]
+        #inp_y = trainlabels_list_np[tuple(idx0)]
+        inp_y = trainlabels_list_np[iset,Z,Y,X]
         y_train_test_subset[i] = inp_y
 
     X_train_subset_t = torch.from_numpy(X_train_test_subset[:nn2_ntrain]).to(torch_device_str_nn2)
@@ -1473,10 +1482,12 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
 
                 # get data point and label
                 #inp_X = data_ordered[*coord,:,:].ravel()
-                #inp_y = trainlabels_list_np[*coord]
-                inp_X = data_ordered[tuple(coord),:,:].ravel()
-                inp_y = trainlabels_list_np[tuple(coord)]
-
+                #inp_y = trainlabels_list_np[*coord]             
+                #inp_X = data_ordered[tuple(coord),:,:].ravel()
+                #inp_y = trainlabels_list_np[tuple(coord)]
+                iset,Z,Y,X = coord
+                inp_X = data_ordered[iset,Z,Y,X,:,:].ravel()
+                inp_y = trainlabels_list_np[iset,Z,Y,X]
                 class_i = int(inp_y)
 
                 if count_per_class[class_i] < max_items_per_class:
