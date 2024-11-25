@@ -61,10 +61,30 @@ import gc
 
 data_vol_norm_process_str = "mean_stdev_3" #standard clipping
 
-nn1_loss_criterion='DiceLoss'
+torch_device_str="cpu"
+if torch.cuda.is_available():
+    torch_device_str = "cuda:0"
+
+
+_N_CLASSES = 3
+def set_n_classes(newval):
+    # Set the number of classes
+    # Set this correctly before running the training
+    global _N_CLASSES
+    if newval>0:
+        _N_CLASSES=newval
+        #Update rest
+        nn1_dict_gen_default["nclasses"]=_N_CLASSES
+        nn2_MLP_model_class_generator_default["nn2_out_nclasses"] = _N_CLASSES
+
+
+nn1_loss_criterion='DiceLoss' # diceloss or crossentropyloss
+# cross entropy losss is not working well
+# in particular when there is multi-class
+
 nn1_eval_metric='MeanIoU'
-nn1_lr=1e-5
-nn1_max_lr=3e-2
+nn1_lr=1e-6
+nn1_max_lr=3e-3
 
 nn1_train_epochs = 10
 # nn1_train_epochs = 5 # debug
@@ -72,38 +92,18 @@ nn1_train_epochs = 10
 nn1_batch_size = 2
 nn1_num_workers = 1
 
-#Default
-# nn1_models_class_generator = [{
-# 'class':'smp', #smp: segmentation models pytorch
-# 'arch': 'U_Net',
-# 'encoder_name': 'resnet34',
-# 'encoder_weights': 'imagenet', # TODO: support for using existing models (loading)
-# 'in_nchannels':1,
-# 'nclasses':3,
-# }]
-
 nn1_axes_to_models_indices = [0,1,2] # By default use the same model for all axes
 # To use different models, use [0,1,2] for model0 along z, model1 along y, and model2 along x
 
 temp_data_outdir = None
-
-
-torch_device_str="cpu"
-if torch.cuda.is_available():
-    torch_device_str = "cuda:0"
-
-# # Number of output classes. Also the max value of the training labels +1
-# # Make sure you change for your data
-# nclasses =3
-
-# 
+ 
 nn1_dict_gen_default = {
     'class':'smp', #smp: segmentation models pytorch
     'arch': 'U_Net',
     'encoder_name': 'resnet34',
     'encoder_weights': 'imagenet', # TODO: support for using existing models (loading)
     'in_nchannels':1, #greyscale
-    'nclasses':3,
+    'nclasses':_N_CLASSES,
 }
 
 nn1_models_class_generator_default = [nn1_dict_gen_default,
@@ -159,6 +159,7 @@ def create_nn1_ptmodel_from_class_generator(nn1_cls_gen_dict: dict):
 NN1_models = None
 nn1_axes_to_models_indices = [0,1,2] #default
 nn1_train_allow_rot90_tfms_per_axis = [True,True,True] #default
+nn1_train_allow_flip_tfms_per_axis = [True,True,True] #default
 
 def update_nn1_models_from_generators():
     """
@@ -234,9 +235,7 @@ def get_train_augmentations_v0(h,w):
                 alb.Transpose(p=0.5),
                 alb.OneOf(
                     [
-                        alb.ElasticTransform(
-                            alpha=120, sigma=120 * 0.07, alpha_affine=120 * 0.04, p=0.5
-                        ),
+                        alb.ElasticTransform( alpha=120, sigma=120 * 0.07, p=0.5),
                         alb.GridDistortion(p=0.5),
                         alb.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
                     ],
@@ -249,7 +248,7 @@ def get_train_augmentations_v0(h,w):
             )
     return tfms0
 
-def get_train_augmentations_v1(h,w, allow90rot=True):
+def get_train_augmentations_v1(h,w, *, allow90rot=True, allowFlips=True):
     # Gets alb augmentations based on image size height x width
     # Initial RandomSizedCrop resizes to nearest multiple of 32
 
@@ -272,28 +271,27 @@ def get_train_augmentations_v1(h,w, allow90rot=True):
                 #Deciding what resizing augmentations is difficult not kowing what
                 # sizes the images can be different
 
-                alb.VerticalFlip(p=0.5),
-                alb.HorizontalFlip(p=0.5),
     ]
     
+    if allowFlips:
+                tfm_list.append( alb.OneOrOther ( first=alb.VerticalFlip(), second=alb.HorizontalFlip() , p=0.5 ) )
+
     if allow90rot:
-        tfm_list.append(alb.RandomRotate90(p=0.5))
+        tfm_list.append(alb.RandomRotate90(p=0.75)) #rotate either by 90, 180 or 270  with 0.5 probability
 
     #Could also use the + operator
     tfm_list.extend([
                 # alb.Transpose(p=0.5), too similar to 90 deg rot
                 alb.OneOf(
                     [
-                        alb.ElasticTransform(
-                            alpha=120, sigma=120 * 0.07, alpha_affine=120 * 0.04, p=0.5
-                        ),
-                        alb.GridDistortion(p=0.5),
-                        alb.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+                        alb.ElasticTransform( alpha=120, sigma=120 * 0.07),
+                        alb.GridDistortion(),
+                        alb.OpticalDistortion(distort_limit=1, shift_limit=0.5),
                     ],
                     p=0.5,
                 ),
                 alb.CLAHE(p=0.5),
-                alb.OneOf([alb.RandomBrightnessContrast(p=0.5),alb.RandomGamma(p=0.5)], p=0.5),
+                alb.OneOf([alb.RandomBrightnessContrast(),alb.RandomGamma()], p=0.5),
                 alb.pytorch.ToTensorV2()
         ]
     )
@@ -307,7 +305,9 @@ class NN1_train_input_dataset_along_axes(Dataset):
     along one or a list of axis
     This is useful for training
     """
-    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2], allow90rot_per_axis=[True,True,True]):
+    def __init__(self, datavols_list, labelsvols_list, axes=[0,1,2],
+                 allow90rot_per_axis=[True,True,True],
+                 allow_flips_per_axis=[True,True,True]):
         #global torch_device_str
         logging.info(f"NN1_train_input_dataset_along_axes __init__ with len(data):{len(datavols_list)}, axes:{axes}")
 
@@ -354,14 +354,20 @@ class NN1_train_input_dataset_along_axes(Dataset):
                 # else:
                 #     raise ValueError(f"ax0 {ax0} not valid")
 
+                data_shape = None
                 if ax0==0:
-                    t0 = get_train_augmentations_v1( *d0[0,:,:].shape, allow90rot=allow90rot_per_axis[0])
+                    #t0 = get_train_augmentations_v1( *d0[0,:,:].shape, allow90rot=allow90rot_per_axis[0], allowFlips=allow_flips_per_axis[0])
+                    data_shape = d0[0,:,:].shape
                 elif ax0==1:
-                    t0 = get_train_augmentations_v1( *d0[:,0,:].shape, allow90rot=allow90rot_per_axis[1])
+                    #t0 = get_train_augmentations_v1( *d0[:,0,:].shape, allow90rot=allow90rot_per_axis[1], allowFlips=allow_flips_per_axis[1])
+                    data_shape = d0[:,0,:].shape
                 elif ax0==2:
-                    t0 = get_train_augmentations_v1( *d0[:,:,0].shape, allow90rot=allow90rot_per_axis[2] )
+                    #t0 = get_train_augmentations_v1( *d0[:,:,0].shape, allow90rot=allow90rot_per_axis[2], allowFlips=allow_flips_per_axis[2])
+                    data_shape = d0[:,:,0].shape
                 else:
                     raise ValueError(f"ax0 {ax0} not valid")
+                
+                t0 = get_train_augmentations_v1( *data_shape, allow90rot=allow90rot_per_axis[ax0], allowFlips=allow_flips_per_axis[ax0])
                 
                 self._idx_to_tfms.extend([t0]*nslices)
 
@@ -409,43 +415,6 @@ class NN1_train_input_dataset_along_axes(Dataset):
         #return a tuple data, mask
         return data, labels
 
-# def create_nn1_dls_from_datalists(traindata_list, trainlabels_list):
-#     """
-#     Create tains and test dataloaders from training data and labels
-#     Test and train data slices are split in proportions 0.8, 0.2
-#     Returns dataloaders_train, dataloaders_test as a list
-
-#     """
-
-#     global nn1_batch_size
-
-#     dataloaders_train=[]
-#     dataloaders_test=[]
-
-#     for i in range(len(NN1_models)):
-#         #Gets the axes that the NN1 model is supposed to be used
-#         model_axes= np.flatnonzero(
-#             np.array(nn1_axes_to_models_indices) == i
-#         ).tolist()
-
-#         dl_train=None
-#         dl_test=None
-
-#         if len(model_axes)>0:
-
-#             ds0 = NN1_train_input_dataset_along_axes(
-#                 traindata_list,
-#                 trainlabels_list,
-#                 axes=model_axes
-#             )
-
-#             dset1, dset2 = torch.utils.data.random_split(ds0, [0.8,0.2])
-
-#             dl_train = DataLoader(dset1, batch_size=nn1_batch_size, shuffle=True)
-#             dl_test = DataLoader(dset2, batch_size=nn1_batch_size, shuffle=True)
-
-#         dataloaders_train.append(dl_train)
-#         dataloaders_test.append(dl_test)
 
 
 nn1_loss_func_and_activ = None
@@ -457,14 +426,18 @@ def update_nn1_loss_func_and_activ():
     """
     global nn1_loss_func_and_activ, nn1_loss_criterion
     global torch_device_str
+    global _N_CLASSES
 
     activ = torch.nn.Sigmoid()
     if "crossentropyloss" in nn1_loss_criterion.lower():
 
         #nn1_loss_func = torch.nn.CrossEntropyLoss().to(torch_device_str) # expects logits!
         if nn2_train_CEloss_weights is None:
-            nn1_loss_func= nn.CrossEntropyLoss().to(torch_device_str)
+            #nn1_loss_func= nn.CrossEntropyLoss().to(torch_device_str) #not working
+            nn1_loss_func= smp.losses.SoftCrossEntropyLoss(ignore_index=0,smooth_factor=0.1).to(torch_device_str) #not sure if it expects logits
+            activ=None
         else:
+            #TODO
             weights_tc = torch.Tensor(nn2_train_CEloss_weights).to(torch_device_str)
             nn1_loss_func=nn.CrossEntropyLoss(weights_tc).to(torch_device_str)
         
@@ -473,7 +446,9 @@ def update_nn1_loss_func_and_activ():
         
         nn1_loss_func_and_activ= {"func":nn1_loss_func, "activ":activ}
     elif "diceloss" in nn1_loss_criterion.lower():
-        nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True).to(torch_device_str)
+        #nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True).to(torch_device_str)
+        #exclude background
+        nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True, ignore_index=0).to(torch_device_str)
         nn1_loss_func_and_activ= {"func":nn1_loss_func, "activ":None}
     else:
         raise ValueError(f"{nn1_loss_criterion} not a valid loss criteria")
@@ -613,10 +588,21 @@ def train_model(model0, dl_train, dl_test, loss_func_and_activ, optimizer, scale
     return {"test_results": test_results}
 
 
+# #Utility function to save nn1 prediction data
+# def _save_pred_data(folder, data, count,axis, rot):
+#     # Saves predicted data to h5 file in tempdir and return file path in case it is needed
+#     file_path = f"{folder}/pred_{count}_{axis}_{rot}.h5"
+
+#     logging.info(f"Saving data of shape {data.shape} to {file_path}.")
+#     with h5py.File(file_path, "w") as f:
+#         f.create_dataset("/data", data=data)
+
+#     return file_path
+
 #Utility function to save nn1 prediction data
-def _save_pred_data(folder, data, count,axis, rot):
+def _save_pred_data(folder, data, count,axis):
     # Saves predicted data to h5 file in tempdir and return file path in case it is needed
-    file_path = f"{folder}/pred_{count}_{axis}_{rot}.h5"
+    file_path = f"{folder}/pred_{count}_{axis}.h5"
 
     logging.info(f"Saving data of shape {data.shape} to {file_path}.")
     with h5py.File(file_path, "w") as f:
@@ -641,8 +627,13 @@ def train_nn1(traindata_list, trainlabels_list):
     if NN1_models is None:
         raise ValueError("No NN1 models to train")
     
+    logging.info(f"nn1_train_allow_rot90_tfms_per_axis:{nn1_train_allow_rot90_tfms_per_axis}")
     if len(nn1_train_allow_rot90_tfms_per_axis)!=3:
         raise ValueError("nn1_train_allow_rot90_tfms_per_axis should have 3 boolean elements")
+    
+    logging.info(f"nn1_train_allow_flip_tfms_per_axis:{nn1_train_allow_flip_tfms_per_axis}")
+    if len(nn1_train_allow_flip_tfms_per_axis)!=3:
+        raise ValueError("nn1_train_allow_flip_tfms_per_axis should have 3 boolean elements")
     
     #reverse nn1_axes_to_models_indices to get model to axis
     def _reverse(n0):
@@ -680,7 +671,8 @@ def train_nn1(traindata_list, trainlabels_list):
             traindata_list,
             trainlabels_list,
             axes = axs,
-            allow90rot_per_axis= nn1_train_allow_rot90_tfms_per_axis
+            allow90rot_per_axis= nn1_train_allow_rot90_tfms_per_axis,
+            allow_flips_per_axis= nn1_train_allow_flip_tfms_per_axis
         )
 
         dset1, dset2 = torch.utils.data.random_split(ds0, [0.8,0.2])
@@ -767,10 +759,13 @@ class VolumeSlicerDataset(Dataset):
         return res_torch
 
 
-def predict_nn1_slices_along_axis_1(datavol, axis):
+def predict_nn1_slices_along_axis(datavol, axis):
     """
     Inference of a single datavol along the given axis
     using the respective NN1_models
+
+    Returns:
+            return pred_oriented, labels_oriented
     """
 
     global NN1_models
@@ -831,10 +826,145 @@ def predict_nn1_slices_along_axis_1(datavol, axis):
     return pred_oriented, labels_oriented
 
 last_nn1_prediction_df = None
+# def predict_nn1(data_to_predict_l, path_out_results):
+
+#     """
+#     Runs predictions from a list of datavolumes, by 12-way (4 rotations * 3 axis)
+
+#     It assumes that volumes have all been normalised
+
+#     Returns: a pandas dataframe listing all the files that have been generated
+#     with the following columns
+#         'pred_data_probs_filenames'
+#         'pred_data_labels_filenames'
+#         'pred_sets'
+#         'pred_planes'
+#         'pred_rots'
+#         'pred_ipred'
+#         'pred_shapes'
+    
+#     As for predictions, for each datavol, and rotations, it predicts two datavolumes
+#         - probabilities for each class at each voxel
+#         - labels (argmax) at each voxel "labels"
+
+#     Note that prediction axis is specified not by index number but by plane
+#     eg: along axis Z will be specified as YX
+
+#     """
+#     global last_nn1_prediction_df
+
+#     logging.info("predict_NN1()")
+#     pred_data_probs_filenames=[] #Will store results in files, and keep the filenames as reference
+#     pred_data_labels_filenames=[]
+#     pred_sets=[]
+#     pred_planes=[]
+#     pred_rots=[]
+#     pred_ipred=[]
+#     pred_shapes=[]
+
+
+#     for iset, data_to_predict in enumerate(data_to_predict_l):
+#         logging.info(f"Data to predict iset:{iset}")
+#         #data_vol = np.array(data_to_predict0) #Copies
+
+#         ipred=0
+#         for krot in range(0, 4): #Around axis rotations
+#             rot_angle_degrees = krot * 90
+#             logging.info(f"Volume to be rotated by {rot_angle_degrees} degrees")
+
+#             #Predict 3 axis
+#             #YX, along Z
+#             # planeYX=(1,2)
+#             logging.info("Predicting YX slices, along Z")
+#             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(1,2))) #rotate
+
+#             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=0, device_str=cuda_str)
+#             prob0,lab0 = predict_nn1_slices_along_axis(data_vol, 0)
+
+#             #invert rotations before saving
+#             pred_probs = np.rot90(prob0, -krot, axes=(2,3)) 
+#             pred_labels = np.rot90(lab0, -krot, axes=(1,2)) #note that class is at start
+
+#             fn = _save_pred_data(path_out_results,pred_probs, iset, "YX", rot_angle_degrees)
+#             pred_data_probs_filenames.append(fn)
+#             fn = _save_pred_data(path_out_results,pred_labels, iset, "YX_labels", rot_angle_degrees)
+#             pred_data_labels_filenames.append(fn)
+            
+#             pred_sets.append(iset)
+#             pred_planes.append("YX")
+#             pred_rots.append(rot_angle_degrees)
+#             pred_ipred.append(ipred)
+#             pred_shapes.append(pred_labels.shape)
+#             ipred+=1
+
+
+
+#             #ZX
+#             logging.info("Predicting ZX slices, along Y")
+#             #planeZX=(0,2)
+#             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,2))) #rotate
+#             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=1, device_str=cuda_str)
+#             prob0,lab0 = predict_nn1_slices_along_axis(data_vol, 1)
+
+
+#             pred_probs = np.rot90(prob0, -krot, axes=(1,3)) #invert rotation before saving
+#             pred_labels = np.rot90(lab0, -krot, axes=(0,2))
+
+#             fn = _save_pred_data(path_out_results,pred_probs, iset, "ZX", rot_angle_degrees)
+#             pred_data_probs_filenames.append(fn)
+#             fn = _save_pred_data(path_out_results,pred_labels, iset, "ZX_labels", rot_angle_degrees)
+#             pred_data_labels_filenames.append(fn)
+            
+#             pred_sets.append(iset)
+#             pred_planes.append("ZX")
+#             pred_rots.append(rot_angle_degrees)
+#             pred_ipred.append(ipred)
+#             pred_shapes.append(pred_labels.shape)
+#             ipred+=1
+
+
+
+#             #ZY
+#             logging.info("Predicting ZY slices, along X")
+#             #planeZY=(0,1)
+#             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,1))) #rotate
+#             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=2, device_str=cuda_str)
+#             prob0,lab0 = predict_nn1_slices_along_axis(data_vol, 2)
+
+#             pred_probs = np.rot90(prob0, -krot, axes=(1,2)) #invert rotation before saving
+#             pred_labels = np.rot90(lab0, -krot, axes=(0,1))
+            
+#             fn = _save_pred_data(path_out_results,pred_probs, iset, "ZY", rot_angle_degrees)
+#             pred_data_probs_filenames.append(fn)
+#             fn = _save_pred_data(path_out_results,pred_labels, iset, "ZY_labels", rot_angle_degrees)
+#             pred_data_labels_filenames.append(fn)
+            
+#             pred_sets.append(iset)
+#             pred_planes.append("ZY")
+#             pred_rots.append(rot_angle_degrees)
+#             pred_ipred.append(ipred)
+#             pred_shapes.append(pred_labels.shape)
+#             ipred+=1
+
+#     all_pred_pd = pd.DataFrame({
+#         'pred_data_probs_filenames': pred_data_probs_filenames,
+#         'pred_data_labels_filenames': pred_data_labels_filenames,
+#         'pred_sets':pred_sets,
+#         'pred_planes':pred_planes,
+#         'pred_rots':pred_rots,
+#         'pred_ipred':pred_ipred,
+#         'pred_shapes': pred_shapes,
+#     })
+
+#     last_nn1_prediction_df = all_pred_pd
+    
+#     return all_pred_pd
+
 def predict_nn1(data_to_predict_l, path_out_results):
 
     """
-    Runs predictions from a list of datavolumes, by 12-way (4 rotations * 3 axis)
+    Runs predictions from a list of datavolumes along the 3 axis
+    (Rotations with 4 rotations not being done anymore in favour for better training)
 
     It assumes that volumes have all been normalised
 
@@ -863,7 +993,6 @@ def predict_nn1(data_to_predict_l, path_out_results):
     pred_data_labels_filenames=[]
     pred_sets=[]
     pred_planes=[]
-    pred_rots=[]
     pred_ipred=[]
     pred_shapes=[]
 
@@ -873,90 +1002,69 @@ def predict_nn1(data_to_predict_l, path_out_results):
         #data_vol = np.array(data_to_predict0) #Copies
 
         ipred=0
-        for krot in range(0, 4): #Around axis rotations
-            rot_angle_degrees = krot * 90
-            logging.info(f"Volume to be rotated by {rot_angle_degrees} degrees")
+        data_vol = np.array(data_to_predict) #copy
+        
+        #Predict 3 axis
 
-            #Predict 3 axis
-            #YX, along Z
-            # planeYX=(1,2)
-            logging.info("Predicting YX slices, along Z")
-            data_vol = np.array(np.rot90(data_to_predict,krot, axes=(1,2))) #rotate
+        #YX, along Z
+        # pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, 0)
+        # fn = _save_pred_data(path_out_results,pred_probs, iset, "YX")
+        # pred_data_probs_filenames.append(fn)
+        # fn = _save_pred_data(path_out_results,pred_labels, iset, "YX_labels")
+        # pred_data_labels_filenames.append(fn)
+        # pred_sets.append(iset)
+        # pred_planes.append("YX")
+        # pred_ipred.append(ipred)
+        # pred_shapes.append(pred_labels.shape)
+        # ipred+=1
 
-            #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=0, device_str=cuda_str)
-            prob0,lab0 = predict_nn1_slices_along_axis_1(data_vol, 0)
 
-            #invert rotations before saving
-            pred_probs = np.rot90(prob0, -krot, axes=(2,3)) 
-            pred_labels = np.rot90(lab0, -krot, axes=(1,2)) #note that class is at start
+        # #ZX
+        # pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, 1)
+        # fn = _save_pred_data(path_out_results,pred_probs, iset, "ZX")
+        # pred_data_probs_filenames.append(fn)
+        # fn = _save_pred_data(path_out_results,pred_labels, iset, "ZX_labels")
+        # pred_data_labels_filenames.append(fn)
+        # pred_sets.append(iset)
+        # pred_planes.append("ZX")
+        # pred_ipred.append(ipred)
+        # pred_shapes.append(pred_labels.shape)
+        # ipred+=1
 
-            fn = _save_pred_data(path_out_results,pred_probs, iset, "YX", rot_angle_degrees)
+        # #ZY
+        # pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, 2)
+        # fn = _save_pred_data(path_out_results,pred_probs, iset, "ZY")
+        # pred_data_probs_filenames.append(fn)
+        # fn = _save_pred_data(path_out_results,pred_labels, iset, "ZY_labels")
+        # pred_data_labels_filenames.append(fn)
+        # pred_sets.append(iset)
+        # pred_planes.append("ZY")
+        # pred_ipred.append(ipred)
+        # pred_shapes.append(pred_labels.shape)
+        # ipred+=1
+
+
+
+        axis_number_to_plane_dict = {0:"YX", 1:"ZX", 2:"ZY"}
+
+        for ax_n, ax_plane in axis_number_to_plane_dict.items():
+            pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, ax_n)
+            fn = _save_pred_data(path_out_results,pred_probs, iset, ax_plane)
             pred_data_probs_filenames.append(fn)
-            fn = _save_pred_data(path_out_results,pred_labels, iset, "YX_labels", rot_angle_degrees)
+            fn = _save_pred_data(path_out_results,pred_labels, iset, f"{ax_plane}_labels")
             pred_data_labels_filenames.append(fn)
-            
             pred_sets.append(iset)
-            pred_planes.append("YX")
-            pred_rots.append(rot_angle_degrees)
+            pred_planes.append(ax_plane)
             pred_ipred.append(ipred)
             pred_shapes.append(pred_labels.shape)
             ipred+=1
 
-
-
-            #ZX
-            logging.info("Predicting ZX slices, along Y")
-            #planeZX=(0,2)
-            data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,2))) #rotate
-            #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=1, device_str=cuda_str)
-            prob0,lab0 = predict_nn1_slices_along_axis_1(data_vol, 1)
-
-
-            pred_probs = np.rot90(prob0, -krot, axes=(1,3)) #invert rotation before saving
-            pred_labels = np.rot90(lab0, -krot, axes=(0,2))
-
-            fn = _save_pred_data(path_out_results,pred_probs, iset, "ZX", rot_angle_degrees)
-            pred_data_probs_filenames.append(fn)
-            fn = _save_pred_data(path_out_results,pred_labels, iset, "ZX_labels", rot_angle_degrees)
-            pred_data_labels_filenames.append(fn)
-            
-            pred_sets.append(iset)
-            pred_planes.append("ZX")
-            pred_rots.append(rot_angle_degrees)
-            pred_ipred.append(ipred)
-            pred_shapes.append(pred_labels.shape)
-            ipred+=1
-
-
-
-            #ZY
-            logging.info("Predicting ZY slices, along X")
-            #planeZY=(0,1)
-            data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,1))) #rotate
-            #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=2, device_str=cuda_str)
-            prob0,lab0 = predict_nn1_slices_along_axis_1(data_vol, 2)
-
-            pred_probs = np.rot90(prob0, -krot, axes=(1,2)) #invert rotation before saving
-            pred_labels = np.rot90(lab0, -krot, axes=(0,1))
-            
-            fn = _save_pred_data(path_out_results,pred_probs, iset, "ZY", rot_angle_degrees)
-            pred_data_probs_filenames.append(fn)
-            fn = _save_pred_data(path_out_results,pred_labels, iset, "ZY_labels", rot_angle_degrees)
-            pred_data_labels_filenames.append(fn)
-            
-            pred_sets.append(iset)
-            pred_planes.append("ZY")
-            pred_rots.append(rot_angle_degrees)
-            pred_ipred.append(ipred)
-            pred_shapes.append(pred_labels.shape)
-            ipred+=1
 
     all_pred_pd = pd.DataFrame({
         'pred_data_probs_filenames': pred_data_probs_filenames,
         'pred_data_labels_filenames': pred_data_labels_filenames,
         'pred_sets':pred_sets,
         'pred_planes':pred_planes,
-        'pred_rots':pred_rots,
         'pred_ipred':pred_ipred,
         'pred_shapes': pred_shapes,
     })
@@ -964,7 +1072,6 @@ def predict_nn1(data_to_predict_l, path_out_results):
     last_nn1_prediction_df = all_pred_pd
     
     return all_pred_pd
-
 
 # NN2 (MLP)
 nn2_model_fusion=None
@@ -974,8 +1081,8 @@ torch_device_str_nn2=torch_device_str # User will have to specify if different
 nn2_MLP_model_class_generator_default = {
     "nn2_hidden_layer_sizes" : "10,10",
     "nn2_activation": 'tanh',
-    "nn2_out_nclasses": 3,
-    "nn2_in_nchannels": 3*12
+    "nn2_out_nclasses": _N_CLASSES,
+    "nn2_in_nchannels": 3*_N_CLASSES # 3axis*nclasses
 }
 
 class MLPClassifier(nn.Module):
@@ -1264,8 +1371,8 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
 
     Typical shape from nsets (=1 if only one training volume) prediction datavolumes
-    with shape 256x256x256, 3 class, 12 predictions,
-    (nsets, 12, 3, 256, 256, 256)
+    with shape 256x256x256, 4 class, 3 axe-predictions,
+    (nsets, 3, 4, 256, 256, 256)
 
     and corresponding labels as a list with a single int volume with shape (256,256,256)
     or np.array with shape (nsets,256,256,256)
@@ -1414,6 +1521,7 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
     #global nn2_ntrain
     global torch_device_str_nn2
     global nn2_ntrain_in_class_balance
+    global _N_CLASSES
 
     logging.info(f"train_nn2_class_balanced()")
     logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
@@ -1426,13 +1534,12 @@ def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
 
     trainlabels_list_np = np.array(trainlabels_list)
 
-    nclasses = np.max(trainlabels_list_np)+1
+    #nclasses = np.max(trainlabels_list_np)+1
+    nclasses = _N_CLASSES
     nvoxels_per_class = [ np.count_nonzero( trainlabels_list_np==i ) for i in range(nclasses) ]
-    logging.info(f"nclasses estimated from max: {nclasses}, nvoxels_per_class:{nvoxels_per_class}")
-
+    logging.info(f"nclasses: {nclasses}, nvoxels_per_class:{nvoxels_per_class}")
 
     logging.info("Adjusting number of elements.")
-
 
     nfrac = nn2_ntrain_in_class_balance // (4*nclasses)
 
@@ -1921,11 +2028,13 @@ def quick_new_and_train_one_unet_model_per_axis(datavols_list, labels_list):
     logging.info("Training complete")
 
 
-def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list, trainYXrot_freeze=False):
+def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
     global nn1_models_class_generator
     global nn1_axes_to_models_indices
     global nn2_MLP_model_class_generator
     global nn1_train_epochs
+    global nn1_train_allow_rot90_tfms_per_axis
+    global nn1_train_allow_flip_tfms_per_axis
 
     logging.info("quick_new_and_train_one_unet_model_per_axis")
 
@@ -1933,15 +2042,13 @@ def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list, trainYXro
         nn1_dict_gen_default.copy()]
     
     nn1_axes_to_models_indices = [0,1,1]
-
-    if trainYXrot_freeze:
-        nn1_train_allow_rot90_tfms_per_axis = [True,False,False]
+    nn1_train_allow_flip_tfms_per_axis = [True,False,False]
+    nn1_train_allow_rot90_tfms_per_axis = [True,False,False]
 
     nn2_MLP_model_class_generator= nn2_MLP_model_class_generator_default
     # Default 3 unet models, one per axis. 3 classes
     # NN2, MLP 10,10
 
-    #nn1_train_epochs= 10
 
     update_nn1_models_from_generators()
     update_nn2_model_from_generator()
