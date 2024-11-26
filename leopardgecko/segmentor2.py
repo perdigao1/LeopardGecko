@@ -82,7 +82,7 @@ nn1_loss_criterion='DiceLoss' # diceloss or crossentropyloss
 # cross entropy losss is not working well
 # in particular when there is multi-class
 
-nn1_eval_metric='MeanIoU'
+nn1_eval_metric='dice'
 nn1_lr=1e-6
 nn1_max_lr=3e-3
 
@@ -1289,7 +1289,7 @@ nn2_max_lr = 5e-2
 
 last_train_nn2_progress = None
 
-nn2_train_do_class_balance= False
+nn2_train_do_class_balance= True
 nn2_ntrain_in_class_balance = 2**16
 
 nn2_train_CEloss_weights = None # Weights for the cross entropy loss function as a list
