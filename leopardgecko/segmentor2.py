@@ -252,39 +252,40 @@ def get_train_augmentations_v1(h,w, *, allow90rot=True, allowFlips=True):
     # Gets alb augmentations based on image size height x width
     # Initial RandomSizedCrop resizes to nearest multiple of 32
 
-    def get_nearest_multiple_of_32(v):
-        i32 = v//32
-        return i32*32
+    # def get_nearest_multiple_of_32(v):
+    #     if v%32==0:
+    #         return v
+    #     i32 = v//32
+    #     return i32*32
 
     img_h, img_w = h,w
 
-    img_h32, img_w32 = get_nearest_multiple_of_32(img_h),  get_nearest_multiple_of_32(img_w)
-    assert img_h32>0 and img_w>0
+    # img_h32, img_w32 = get_nearest_multiple_of_32(img_h),  get_nearest_multiple_of_32(img_w)
+    # assert img_h32>0 and img_w32>0
 
-    tfm_list = [
-                alb.RandomSizedCrop(
-                    min_max_height= (img_h32//2, img_h32),
-                    height=img_h32,
-                    width=img_w32 ,
-                    p=0.5,
-                ),
-                #Deciding what resizing augmentations is difficult not kowing what
-                # sizes the images can be different
+    # tfm_list = [ alb.OneOf([
+    #                 alb.RandomSizedCrop( min_max_height= (img_h32//2, img_h32), height=img_h32, width=img_w32 , p=0.5),
+    #                 alb.RandomCrop( height=img_h32,width=img_w32, p=0.5)
+    #                 ], p=1.0)
+    #             ]
+    tfm_list =[]
 
-    ]
-    
+
     if allowFlips:
                 tfm_list.append( alb.OneOrOther ( first=alb.VerticalFlip(), second=alb.HorizontalFlip() , p=0.5 ) )
 
     if allow90rot:
-        tfm_list.append(alb.RandomRotate90(p=0.75)) #rotate either by 90, 180 or 270  with 0.5 probability
+        tfm_list.append( alb.RandomRotate90(p=0.75) ) #rotate either by 90, 180 or 270  with 0.5 probability
+
+    tfm_list.append( alb.RandomSizedCrop( min_max_height= (img_h//2, img_h), height=img_h, width=img_w , p=0.5) )
 
     #Could also use the + operator
     tfm_list.extend([
                 # alb.Transpose(p=0.5), too similar to 90 deg rot
                 alb.OneOf(
                     [
-                        alb.ElasticTransform( alpha=120, sigma=120 * 0.07),
+                        # alb.ElasticTransform( alpha=120, sigma=120 * 0.07),
+                        alb.ElasticTransform(alpha=50, sigma=120 * 0.07),
                         alb.GridDistortion(),
                         alb.OpticalDistortion(distort_limit=1, shift_limit=0.5),
                     ],
@@ -487,7 +488,7 @@ def train_loop(dataloader, model, loss_func_and_activ, optimizer, scaler, schedu
     # Set the model to training mode - important for batch normalization and dropout layers
     # Unnecessary in this situation but added for best practices
     model.train()
-    for batch, (X, y) in enumerate(dataloader):
+    for batch, (X, y) in enumerate(dataloader): #problem if data is 184 size
         #X=X_parse(X)
         # Compute prediction and loss
         pred = model(X)
@@ -627,15 +628,7 @@ def train_nn1(traindata_list, trainlabels_list):
 
     if NN1_models is None:
         raise ValueError("No NN1 models to train")
-    
-    logging.info(f"nn1_train_allow_rot90_tfms_per_axis:{nn1_train_allow_rot90_tfms_per_axis}")
-    if len(nn1_train_allow_rot90_tfms_per_axis)!=3:
-        raise ValueError("nn1_train_allow_rot90_tfms_per_axis should have 3 boolean elements")
-    
-    logging.info(f"nn1_train_allow_flip_tfms_per_axis:{nn1_train_allow_flip_tfms_per_axis}")
-    if len(nn1_train_allow_flip_tfms_per_axis)!=3:
-        raise ValueError("nn1_train_allow_flip_tfms_per_axis should have 3 boolean elements")
-    
+
     #reverse nn1_axes_to_models_indices to get model to axis
     def _reverse(n0):
         nmodel_max = max(n0)
@@ -647,6 +640,39 @@ def train_nn1(traindata_list, trainlabels_list):
     
     models_to_axis = _reverse(nn1_axes_to_models_indices)
     logging.info(f"models_to_axis: {models_to_axis}")
+
+    logging.info( "Checking data sizes are compatible with models" )
+    data_example = traindata_list[0]
+    for imodel, axs in enumerate(models_to_axis):
+        data_ex_slice=None
+        for ax0 in axs:
+            if ax0 ==0:
+                data_ex_slice = data_example[0,:,:]
+            if ax0 ==1:
+                data_ex_slice = data_example[:,0,:]
+            if ax0 ==2:
+                data_ex_slice = data_example[:,:,1]
+            
+            model = NN1_models[imodel]
+            model.eval()
+
+            data_ex_slice_tc = torch.from_numpy(np.expand_dims(data_ex_slice,axis=(0,1))).float().to(torch_device_str)
+            
+
+            try:
+                _ = model(data_ex_slice_tc)
+            except RuntimeError as e:
+                raise RuntimeError(f"Runtime error occurred when testing a slice of data with shape {data_example.shape} along axis {axs} on the model {imodel}. Try different volume size such as multiples of 32.")
+        
+    logging.info(f"nn1_train_allow_rot90_tfms_per_axis:{nn1_train_allow_rot90_tfms_per_axis}")
+    if len(nn1_train_allow_rot90_tfms_per_axis)!=3:
+        raise ValueError("nn1_train_allow_rot90_tfms_per_axis should have 3 boolean elements")
+    
+    logging.info(f"nn1_train_allow_flip_tfms_per_axis:{nn1_train_allow_flip_tfms_per_axis}")
+    if len(nn1_train_allow_flip_tfms_per_axis)!=3:
+        raise ValueError("nn1_train_allow_flip_tfms_per_axis should have 3 boolean elements")
+    
+
 
     if len(models_to_axis)==0:
         raise ValueError("models_to_axis has no elements")
@@ -1041,7 +1067,7 @@ nn2_MLP_model_class_generator_default = {
     "nn2_hidden_layer_sizes" : "4,4",
     "nn2_activation": 'tanh',
     "nn2_out_nclasses": _N_CLASSES,
-    "nn2_in_nchannels": 3*_N_CLASSES # 3axis*nclasses
+    #"nn2_in_nchannels": 3*_N_CLASSES # 3axis*nclasses
 }
 
 class MLPClassifier(nn.Module):
@@ -1101,7 +1127,8 @@ def create_nn2_ptmodel_from_class_generator(nn2_cls_gen_dict: dict ):
     logging.info(f"hid_layers_num_list: {hid_layers_num_list}")
     
     model0 = MLPClassifier(
-        nn2_cls_gen_dict['nn2_in_nchannels'],
+        #nn2_cls_gen_dict['nn2_in_nchannels'],
+        3*nn2_cls_gen_dict['nn2_out_nclasses'], # 3 axis
         hid_layers_num_list,
         nn2_cls_gen_dict['nn2_out_nclasses'],
         nn2_cls_gen_dict["nn2_activation"]
