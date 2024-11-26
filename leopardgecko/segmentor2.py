@@ -90,7 +90,7 @@ nn1_train_epochs = 10
 # nn1_train_epochs = 5 # debug
 
 nn1_batch_size = 2
-nn1_num_workers = 1
+#nn1_num_workers = 1
 
 nn1_axes_to_models_indices = [0,1,2] # By default use the same model for all axes
 # To use different models, use [0,1,2] for model0 along z, model1 along y, and model2 along x
@@ -250,24 +250,9 @@ def get_train_augmentations_v0(h,w):
 
 def get_train_augmentations_v1(h,w, *, allow90rot=True, allowFlips=True):
     # Gets alb augmentations based on image size height x width
-    # Initial RandomSizedCrop resizes to nearest multiple of 32
-
-    # def get_nearest_multiple_of_32(v):
-    #     if v%32==0:
-    #         return v
-    #     i32 = v//32
-    #     return i32*32
 
     img_h, img_w = h,w
 
-    # img_h32, img_w32 = get_nearest_multiple_of_32(img_h),  get_nearest_multiple_of_32(img_w)
-    # assert img_h32>0 and img_w32>0
-
-    # tfm_list = [ alb.OneOf([
-    #                 alb.RandomSizedCrop( min_max_height= (img_h32//2, img_h32), height=img_h32, width=img_w32 , p=0.5),
-    #                 alb.RandomCrop( height=img_h32,width=img_w32, p=0.5)
-    #                 ], p=1.0)
-    #             ]
     tfm_list =[]
 
 
@@ -346,14 +331,6 @@ class NN1_train_input_dataset_along_axes(Dataset):
                 slice_range = np.arange(0,nslices).tolist()
                 self._idx_to_slicen.extend(slice_range)
 
-                # if ax0==0:
-                #     t0 = get_train_augmentations_v0( *d0[0,:,:].shape )
-                # elif ax0==1:
-                #     t0 = get_train_augmentations_v0( *d0[:,0,:].shape )
-                # elif ax0==2:
-                #     t0 = get_train_augmentations_v0( *d0[:,:,0].shape )
-                # else:
-                #     raise ValueError(f"ax0 {ax0} not valid")
 
                 data_shape = None
                 if ax0==0:
@@ -590,18 +567,6 @@ def train_model(model0, dl_train, dl_test, loss_func_and_activ, optimizer, scale
     return {"test_results": test_results}
 
 
-# #Utility function to save nn1 prediction data
-# def _save_pred_data(folder, data, count,axis, rot):
-#     # Saves predicted data to h5 file in tempdir and return file path in case it is needed
-#     file_path = f"{folder}/pred_{count}_{axis}_{rot}.h5"
-
-#     logging.info(f"Saving data of shape {data.shape} to {file_path}.")
-#     with h5py.File(file_path, "w") as f:
-#         f.create_dataset("/data", data=data)
-
-#     return file_path
-
-#Utility function to save nn1 prediction data
 def _save_pred_data(folder, data, count,axis):
     # Saves predicted data to h5 file in tempdir and return file path in case it is needed
     file_path = f"{folder}/pred_{count}_{axis}.h5"
@@ -853,139 +818,7 @@ def predict_nn1_slices_along_axis(datavol, axis):
     return pred_oriented, labels_oriented
 
 last_nn1_prediction_df = None
-# def predict_nn1(data_to_predict_l, path_out_results):
 
-#     """
-#     Runs predictions from a list of datavolumes, by 12-way (4 rotations * 3 axis)
-
-#     It assumes that volumes have all been normalised
-
-#     Returns: a pandas dataframe listing all the files that have been generated
-#     with the following columns
-#         'pred_data_probs_filenames'
-#         'pred_data_labels_filenames'
-#         'pred_sets'
-#         'pred_planes'
-#         'pred_rots'
-#         'pred_ipred'
-#         'pred_shapes'
-    
-#     As for predictions, for each datavol, and rotations, it predicts two datavolumes
-#         - probabilities for each class at each voxel
-#         - labels (argmax) at each voxel "labels"
-
-#     Note that prediction axis is specified not by index number but by plane
-#     eg: along axis Z will be specified as YX
-
-#     """
-#     global last_nn1_prediction_df
-
-#     logging.info("predict_NN1()")
-#     pred_data_probs_filenames=[] #Will store results in files, and keep the filenames as reference
-#     pred_data_labels_filenames=[]
-#     pred_sets=[]
-#     pred_planes=[]
-#     pred_rots=[]
-#     pred_ipred=[]
-#     pred_shapes=[]
-
-
-#     for iset, data_to_predict in enumerate(data_to_predict_l):
-#         logging.info(f"Data to predict iset:{iset}")
-#         #data_vol = np.array(data_to_predict0) #Copies
-
-#         ipred=0
-#         for krot in range(0, 4): #Around axis rotations
-#             rot_angle_degrees = krot * 90
-#             logging.info(f"Volume to be rotated by {rot_angle_degrees} degrees")
-
-#             #Predict 3 axis
-#             #YX, along Z
-#             # planeYX=(1,2)
-#             logging.info("Predicting YX slices, along Z")
-#             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(1,2))) #rotate
-
-#             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=0, device_str=cuda_str)
-#             prob0,lab0 = predict_nn1_slices_along_axis(data_vol, 0)
-
-#             #invert rotations before saving
-#             pred_probs = np.rot90(prob0, -krot, axes=(2,3)) 
-#             pred_labels = np.rot90(lab0, -krot, axes=(1,2)) #note that class is at start
-
-#             fn = _save_pred_data(path_out_results,pred_probs, iset, "YX", rot_angle_degrees)
-#             pred_data_probs_filenames.append(fn)
-#             fn = _save_pred_data(path_out_results,pred_labels, iset, "YX_labels", rot_angle_degrees)
-#             pred_data_labels_filenames.append(fn)
-            
-#             pred_sets.append(iset)
-#             pred_planes.append("YX")
-#             pred_rots.append(rot_angle_degrees)
-#             pred_ipred.append(ipred)
-#             pred_shapes.append(pred_labels.shape)
-#             ipred+=1
-
-
-
-#             #ZX
-#             logging.info("Predicting ZX slices, along Y")
-#             #planeZX=(0,2)
-#             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,2))) #rotate
-#             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=1, device_str=cuda_str)
-#             prob0,lab0 = predict_nn1_slices_along_axis(data_vol, 1)
-
-
-#             pred_probs = np.rot90(prob0, -krot, axes=(1,3)) #invert rotation before saving
-#             pred_labels = np.rot90(lab0, -krot, axes=(0,2))
-
-#             fn = _save_pred_data(path_out_results,pred_probs, iset, "ZX", rot_angle_degrees)
-#             pred_data_probs_filenames.append(fn)
-#             fn = _save_pred_data(path_out_results,pred_labels, iset, "ZX_labels", rot_angle_degrees)
-#             pred_data_labels_filenames.append(fn)
-            
-#             pred_sets.append(iset)
-#             pred_planes.append("ZX")
-#             pred_rots.append(rot_angle_degrees)
-#             pred_ipred.append(ipred)
-#             pred_shapes.append(pred_labels.shape)
-#             ipred+=1
-
-
-
-#             #ZY
-#             logging.info("Predicting ZY slices, along X")
-#             #planeZY=(0,1)
-#             data_vol = np.array(np.rot90(data_to_predict,krot, axes=(0,1))) #rotate
-#             #prob0,lab0 = nn1_predict_slices_along_axis(data_vol, axis=2, device_str=cuda_str)
-#             prob0,lab0 = predict_nn1_slices_along_axis(data_vol, 2)
-
-#             pred_probs = np.rot90(prob0, -krot, axes=(1,2)) #invert rotation before saving
-#             pred_labels = np.rot90(lab0, -krot, axes=(0,1))
-            
-#             fn = _save_pred_data(path_out_results,pred_probs, iset, "ZY", rot_angle_degrees)
-#             pred_data_probs_filenames.append(fn)
-#             fn = _save_pred_data(path_out_results,pred_labels, iset, "ZY_labels", rot_angle_degrees)
-#             pred_data_labels_filenames.append(fn)
-            
-#             pred_sets.append(iset)
-#             pred_planes.append("ZY")
-#             pred_rots.append(rot_angle_degrees)
-#             pred_ipred.append(ipred)
-#             pred_shapes.append(pred_labels.shape)
-#             ipred+=1
-
-#     all_pred_pd = pd.DataFrame({
-#         'pred_data_probs_filenames': pred_data_probs_filenames,
-#         'pred_data_labels_filenames': pred_data_labels_filenames,
-#         'pred_sets':pred_sets,
-#         'pred_planes':pred_planes,
-#         'pred_rots':pred_rots,
-#         'pred_ipred':pred_ipred,
-#         'pred_shapes': pred_shapes,
-#     })
-
-#     last_nn1_prediction_df = all_pred_pd
-    
-#     return all_pred_pd
 
 def predict_nn1(data_to_predict_l, path_out_results):
 
@@ -1918,7 +1751,6 @@ nn1_train_CEloss_weights: {nn1_train_CEloss_weights}
 nn1_train_allow_rot90_tfms_per_axis: {nn1_train_allow_rot90_tfms_per_axis}
 
 nn1_batch_size = {nn1_batch_size}
-nn1_num_workers = {nn1_num_workers}
 
 nn2_ntrain: {nn2_ntrain}
 nn2_train_epochs: {nn2_train_epochs}
