@@ -434,7 +434,8 @@ def update_nn1_loss_func_and_activ():
         #nn1_loss_func = torch.nn.CrossEntropyLoss().to(torch_device_str) # expects logits!
         if nn2_train_CEloss_weights is None:
             #nn1_loss_func= nn.CrossEntropyLoss().to(torch_device_str) #not working
-            nn1_loss_func= smp.losses.SoftCrossEntropyLoss(ignore_index=0,smooth_factor=0.1).to(torch_device_str) #not sure if it expects logits
+            #nn1_loss_func= smp.losses.SoftCrossEntropyLoss(ignore_index=0,smooth_factor=0.0).to(torch_device_str) #not sure if it expects logits
+            nn1_loss_func= smp.losses.SoftCrossEntropyLoss(smooth_factor=0.0).to(torch_device_str) #not sure if it expects logits
             activ=None
         else:
             #TODO
@@ -446,9 +447,9 @@ def update_nn1_loss_func_and_activ():
         
         nn1_loss_func_and_activ= {"func":nn1_loss_func, "activ":activ}
     elif "diceloss" in nn1_loss_criterion.lower():
-        #nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True).to(torch_device_str)
-        #exclude background
-        nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True, ignore_index=0).to(torch_device_str)
+        nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True).to(torch_device_str)
+        #exclude background? Does not work
+        #nn1_loss_func = smp.losses.DiceLoss(mode='multiclass', from_logits=True, ignore_index=0).to(torch_device_str)
         nn1_loss_func_and_activ= {"func":nn1_loss_func, "activ":None}
     else:
         raise ValueError(f"{nn1_loss_criterion} not a valid loss criteria")
@@ -974,7 +975,6 @@ def predict_nn1(data_to_predict_l, path_out_results):
         'pred_data_labels_filenames'
         'pred_sets'
         'pred_planes'
-        'pred_rots'
         'pred_ipred'
         'pred_shapes'
     
@@ -1003,47 +1003,6 @@ def predict_nn1(data_to_predict_l, path_out_results):
 
         ipred=0
         data_vol = np.array(data_to_predict) #copy
-        
-        #Predict 3 axis
-
-        #YX, along Z
-        # pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, 0)
-        # fn = _save_pred_data(path_out_results,pred_probs, iset, "YX")
-        # pred_data_probs_filenames.append(fn)
-        # fn = _save_pred_data(path_out_results,pred_labels, iset, "YX_labels")
-        # pred_data_labels_filenames.append(fn)
-        # pred_sets.append(iset)
-        # pred_planes.append("YX")
-        # pred_ipred.append(ipred)
-        # pred_shapes.append(pred_labels.shape)
-        # ipred+=1
-
-
-        # #ZX
-        # pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, 1)
-        # fn = _save_pred_data(path_out_results,pred_probs, iset, "ZX")
-        # pred_data_probs_filenames.append(fn)
-        # fn = _save_pred_data(path_out_results,pred_labels, iset, "ZX_labels")
-        # pred_data_labels_filenames.append(fn)
-        # pred_sets.append(iset)
-        # pred_planes.append("ZX")
-        # pred_ipred.append(ipred)
-        # pred_shapes.append(pred_labels.shape)
-        # ipred+=1
-
-        # #ZY
-        # pred_probs,pred_labels = predict_nn1_slices_along_axis(data_vol, 2)
-        # fn = _save_pred_data(path_out_results,pred_probs, iset, "ZY")
-        # pred_data_probs_filenames.append(fn)
-        # fn = _save_pred_data(path_out_results,pred_labels, iset, "ZY_labels")
-        # pred_data_labels_filenames.append(fn)
-        # pred_sets.append(iset)
-        # pred_planes.append("ZY")
-        # pred_ipred.append(ipred)
-        # pred_shapes.append(pred_labels.shape)
-        # ipred+=1
-
-
 
         axis_number_to_plane_dict = {0:"YX", 1:"ZX", 2:"ZY"}
 
@@ -1079,7 +1038,7 @@ nn2_MLP_model_class_generator=None
 torch_device_str_nn2=torch_device_str # User will have to specify if different
 
 nn2_MLP_model_class_generator_default = {
-    "nn2_hidden_layer_sizes" : "10,10",
+    "nn2_hidden_layer_sizes" : "4,4",
     "nn2_activation": 'tanh',
     "nn2_out_nclasses": _N_CLASSES,
     "nn2_in_nchannels": 3*_N_CLASSES # 3axis*nclasses
@@ -1326,6 +1285,8 @@ def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
     #global nn2_loss_func_and_activ
     global torch_device_str_nn2
     global last_train_nn2_progress
+    global nn1_loss_func_and_activ
+    global nn1_metric_func
 
     model=nn2_model_fusion
     model.to(torch_device_str_nn2)# ensure is in the correct device
@@ -1344,11 +1305,11 @@ def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
         epochs=epochs,
         #pct_start=0.1, #default=0.3
         )
-    if nn2_train_CEloss_weights is None:
-        nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss().to(torch_device_str_nn2), "activ":None}
-    else:
-        weights_tc = torch.Tensor(nn2_train_CEloss_weights).to(torch_device_str_nn2) #convert to tensor
-        nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss(weights_tc).to(torch_device_str_nn2), "activ":None}
+    # if nn2_train_CEloss_weights is None:
+    #     nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss().to(torch_device_str_nn2), "activ":None}
+    # else:
+    #     weights_tc = torch.Tensor(nn2_train_CEloss_weights).to(torch_device_str_nn2) #convert to tensor
+    #     nn2_loss_func_and_activ= {"func": nn.CrossEntropyLoss(weights_tc).to(torch_device_str_nn2), "activ":None}
 
     logging.info("Beggining training NN2.")
 
@@ -1356,10 +1317,12 @@ def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
         model,
         nn2_train_loader,
         nn2_test_loader, # use train data as test?
-        nn2_loss_func_and_activ,
+        #nn2_loss_func_and_activ,
+        nn1_loss_func_and_activ, #Try to use same loss
         optimizer, scaler, scheduler,
         epochs=epochs,
-        metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
+        #metric_fn = segmentation_models_pytorch.utils.metrics.Accuracy()
+        metric_fn = nn1_metric_func
     )
 
     logging.info("Training NN2 complete.")
@@ -2042,7 +2005,7 @@ def quick_new_and_train_2unets_z_xy_models(datavols_list, labels_list):
         nn1_dict_gen_default.copy()]
     
     nn1_axes_to_models_indices = [0,1,1]
-    nn1_train_allow_flip_tfms_per_axis = [True,False,False]
+    nn1_train_allow_flip_tfms_per_axis = [True,True,True]
     nn1_train_allow_rot90_tfms_per_axis = [True,False,False]
 
     nn2_MLP_model_class_generator= nn2_MLP_model_class_generator_default
