@@ -34,7 +34,7 @@ import tempfile
 import logging
 import pandas as pd
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset
@@ -578,6 +578,8 @@ def _save_pred_data(folder, data, count,axis):
     return file_path
 
 last_train_nn1_progress=None
+nn1_train_do_class_balance = True # balance classes using WeightedRandomSampler
+
 def train_nn1(traindata_list, trainlabels_list):
     """
     Train each of the NN1 models individually taking into
@@ -590,6 +592,7 @@ def train_nn1(traindata_list, trainlabels_list):
     global last_train_nn1_progress
     global nn1_train_epochs
     global nn1_train_allow_rot90_tfms_per_axis
+    global nn1_train_do_class_balance
 
     if NN1_models is None:
         raise ValueError("No NN1 models to train")
@@ -637,8 +640,6 @@ def train_nn1(traindata_list, trainlabels_list):
     if len(nn1_train_allow_flip_tfms_per_axis)!=3:
         raise ValueError("nn1_train_allow_flip_tfms_per_axis should have 3 boolean elements")
     
-
-
     if len(models_to_axis)==0:
         raise ValueError("models_to_axis has no elements")
 
@@ -668,9 +669,20 @@ def train_nn1(traindata_list, trainlabels_list):
         )
 
         dset1, dset2 = torch.utils.data.random_split(ds0, [0.8,0.2])
+        
+        # WeighetedRandomSampler for class imbalance
+        if not nn1_train_do_class_balance:
+            dl_train = DataLoader(dset1, batch_size=nn1_batch_size, shuffle=True)
+            dl_test = DataLoader(dset2, batch_size=nn1_batch_size, shuffle=True)
 
-        dl_train = DataLoader(dset1, batch_size=nn1_batch_size, shuffle=True)
-        dl_test = DataLoader(dset2, batch_size=nn1_batch_size, shuffle=True)
+        else:
+            logging.info("nn1_train_do_class_balance=True. Will balance classes")
+
+            
+            dl_train = DataLoader(dset1, batch_size=nn1_batch_size, sampler=get_weightedrandomsampler_from_dataset(dset1))
+            dl_test = DataLoader(dset2, batch_size=nn1_batch_size, sampler=get_weightedrandomsampler_from_dataset(dset2))
+            
+            logging.info("Dataloaders with WeightedRandomSampler for train and test data created")
 
         model = NN1_models[imodel]
 
@@ -1127,12 +1139,12 @@ nn2_ntrain_in_class_balance = 2**16
 
 nn2_train_CEloss_weights = None # Weights for the cross entropy loss function as a list
 
-def train_nn2(data_all_np6d, trainlabels_list):
+# def train_nn2(data_all_np6d, trainlabels_list):
 
-    if nn2_train_do_class_balance:
-        return train_nn2_class_balanced(data_all_np6d, trainlabels_list)
+#     if nn2_train_do_class_balance:
+#         return train_nn2_class_balanced(data_all_np6d, trainlabels_list)
 
-    return train_nn2_default(data_all_np6d, trainlabels_list)
+#     return train_nn2_default(data_all_np6d, trainlabels_list)
 
 
 def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
@@ -1188,7 +1200,8 @@ def _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader):
     logging.info("Training NN2 complete.")
 
 
-def train_nn2_default(data_all_np6d, trainlabels_list):
+# def train_nn2_default(data_all_np6d, trainlabels_list):
+def train_nn2(data_all_np6d, trainlabels_list):
     """
     data_all_np6d: per voxel per class probabilites of predictions.
     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
@@ -1303,173 +1316,176 @@ def train_nn2_default(data_all_np6d, trainlabels_list):
     y_train_subset_t = torch.from_numpy(y_train_test_subset[:nn2_ntrain]).long().to(torch_device_str_nn2)
 
     logging.info("X_train_subset_t and y_train_subset_t created")
-
     dataset_X_y_train = TensorDataset(X_train_subset_t, y_train_subset_t)
-    nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, shuffle=True)
-
     logging.info("dataset_X_y_train created")
 
 
     # test datasets
     logging.info("Creating test dataset")
-    
     X_test_subset_t = torch.from_numpy(X_train_test_subset[nn2_ntrain:nn2_ntrain+ntest]).to(torch_device_str_nn2)
     y_test_subset_t = torch.from_numpy(y_train_test_subset[nn2_ntrain:nn2_ntrain+ntest]).long().to(torch_device_str_nn2)
-
     logging.info("X_test_subset_t and y_test_subset_t created")
-
     dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
-    nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
-
     logging.info("dataset_X_y_test created")
+
+    if not nn2_train_do_class_balance:
+        nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, shuffle=True)
+        nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
+        logging.info("nn2_train_loader and nn2_test_loader created")
+    else:
+        # balance
+        nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, sampler=get_weightedrandomsampler_from_dataset(dataset_X_y_train))
+        nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, sampler=get_weightedrandomsampler_from_dataset(dataset_X_y_test))
+        logging.info("nn2_train_loader and nn2_test_loader created using ")
+
 
     _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader)
 
 
-def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
-    """
-    data_all_np6d: per voxel per class probabilites of predictions.
-    This can be collected using aggregate_data_from_pd() with output from predict_nn1()
+# def train_nn2_class_balanced(data_all_np6d, trainlabels_list):
+#     """
+#     data_all_np6d: per voxel per class probabilites of predictions.
+#     This can be collected using aggregate_data_from_pd() with output from predict_nn1()
 
-    Typical shape from nsets (=1 if only one training volume) prediction datavolumes
-    with shape 256x256x256, 3 class, 12 predictions,
-    (nsets, 12, 3, 256, 256, 256)
+#     Typical shape from nsets (=1 if only one training volume) prediction datavolumes
+#     with shape 256x256x256, 3 class, 12 predictions,
+#     (nsets, 12, 3, 256, 256, 256)
 
-    and corresponding labels as a list with a single int volume with shape (256,256,256)
-    or np.array with shape (nsets,256,256,256)
+#     and corresponding labels as a list with a single int volume with shape (256,256,256)
+#     or np.array with shape (nsets,256,256,256)
 
-    """
+#     """
 
-    global nn2_model_fusion
-    #global nn2_ntrain
-    global torch_device_str_nn2
-    global nn2_ntrain_in_class_balance
-    global _N_CLASSES
+#     global nn2_model_fusion
+#     #global nn2_ntrain
+#     global torch_device_str_nn2
+#     global nn2_ntrain_in_class_balance
+#     global _N_CLASSES
 
-    logging.info(f"train_nn2_class_balanced()")
-    logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
-    logging.info(f"nn2_ntrain_in_class_balance:{nn2_ntrain_in_class_balance}")#
+#     logging.info(f"train_nn2_class_balanced()")
+#     logging.info(f"data_all_np5d.shape:{data_all_np6d.shape}, len(trainlabels_list): {len(trainlabels_list)}")
+#     logging.info(f"nn2_ntrain_in_class_balance:{nn2_ntrain_in_class_balance}")#
 
-    if nn2_model_fusion is None:
-        raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
+#     if nn2_model_fusion is None:
+#         raise ValueError("No NN2_model_fusion setup. Please make sure you created by either using update_NN2_model_from_generator() or by loading")
 
-    data_ordered = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
+#     data_ordered = np.transpose( data_all_np6d , axes=(0,3,4,5,1,2)) # turn to [ iset, Z ,Y ,X, ipred (from 0 to 12) , probs]
 
-    trainlabels_list_np = np.array(trainlabels_list)
+#     trainlabels_list_np = np.array(trainlabels_list)
 
-    #nclasses = np.max(trainlabels_list_np)+1
-    nclasses = _N_CLASSES
-    nvoxels_per_class = [ np.count_nonzero( trainlabels_list_np==i ) for i in range(nclasses) ]
-    logging.info(f"nclasses: {nclasses}, nvoxels_per_class:{nvoxels_per_class}")
+#     #nclasses = np.max(trainlabels_list_np)+1
+#     nclasses = _N_CLASSES
+#     nvoxels_per_class = [ np.count_nonzero( trainlabels_list_np==i ) for i in range(nclasses) ]
+#     logging.info(f"nclasses: {nclasses}, nvoxels_per_class:{nvoxels_per_class}")
 
-    logging.info("Adjusting number of elements.")
+#     logging.info("Adjusting number of elements.")
 
-    nfrac = nn2_ntrain_in_class_balance // (4*nclasses)
+#     nfrac = nn2_ntrain_in_class_balance // (4*nclasses)
 
-    max_items_per_class = 5*nfrac
+#     max_items_per_class = 5*nfrac
     
-    thrs_vox_per_class = np.array(nvoxels_per_class)//16
+#     thrs_vox_per_class = np.array(nvoxels_per_class)//16
 
-    if np.any( thrs_vox_per_class < max_items_per_class):
-        logging.info(f"Some thrs_vox_per_class {thrs_vox_per_class} are smaller than max_items_per_class {max_items_per_class}")
-        nfrac = np.min(thrs_vox_per_class)//5
-        max_items_per_class= 5*nfrac
-        logging.info(f"Adjusting max_items_per_class to {max_items_per_class}")
+#     if np.any( thrs_vox_per_class < max_items_per_class):
+#         logging.info(f"Some thrs_vox_per_class {thrs_vox_per_class} are smaller than max_items_per_class {max_items_per_class}")
+#         nfrac = np.min(thrs_vox_per_class)//5
+#         max_items_per_class= 5*nfrac
+#         logging.info(f"Adjusting max_items_per_class to {max_items_per_class}")
     
-    #Re-Adjusts
-    ntrain = nfrac*4*nclasses
-    ntest = nfrac*nclasses #test dataset is a quarter of train dataset
-    ntotal = ntrain+ntest
+#     #Re-Adjusts
+#     ntrain = nfrac*4*nclasses
+#     ntest = nfrac*nclasses #test dataset is a quarter of train dataset
+#     ntotal = ntrain+ntest
 
-    logging.info(f"max_items_per_class: {max_items_per_class}, ntotal (adjusted):{ntotal}")
+#     logging.info(f"max_items_per_class: {max_items_per_class}, ntotal (adjusted):{ntotal}")
 
 
-    logging.info("Selecting only nn2_ntrain_in_class_balance voxel coordinates from data and ground truth for training by balancing class labels.")
+#     logging.info("Selecting only nn2_ntrain_in_class_balance voxel coordinates from data and ground truth for training by balancing class labels.")
 
-    nvoxels = np.prod(data_ordered.shape[:4])
-    ninputs = data_ordered.shape[4]*data_ordered.shape[5]
+#     nvoxels = np.prod(data_ordered.shape[:4])
+#     ninputs = data_ordered.shape[4]*data_ordered.shape[5]
 
-    #initialise
-    X_train_test_subset = np.zeros( (ntotal, ninputs), dtype=np.float32)
-    y_train_test_subset = np.zeros( (ntotal) , dtype=np.int16)
+#     #initialise
+#     X_train_test_subset = np.zeros( (ntotal, ninputs), dtype=np.float32)
+#     y_train_test_subset = np.zeros( (ntotal) , dtype=np.int16)
 
-    # Collect datapoints
+#     # Collect datapoints
 
-    #while True: #DANGER
-    count_per_class = np.zeros((nclasses), dtype=np.int64)
-    unique_flat_idxs = []
-    shape0 = data_ordered.shape[:4]
+#     #while True: #DANGER
+#     count_per_class = np.zeros((nclasses), dtype=np.int64)
+#     unique_flat_idxs = []
+#     shape0 = data_ordered.shape[:4]
 
-    ielement = 0 #counter
-    with tqdm(total=ntotal) as tqdm_pbar:
-        for i in range(nvoxels): # *10 to impose a timeout, normally it should simply exit with a break
+#     ielement = 0 #counter
+#     with tqdm(total=ntotal) as tqdm_pbar:
+#         for i in range(nvoxels): # *10 to impose a timeout, normally it should simply exit with a break
             
-            random_flat_idx = random.randint(0, nvoxels-1)
+#             random_flat_idx = random.randint(0, nvoxels-1)
 
-            if random_flat_idx not in unique_flat_idxs:
-                #Apply unravel to a single element
-                coord = np.transpose(np.unravel_index( [random_flat_idx], shape0 ))[0]
+#             if random_flat_idx not in unique_flat_idxs:
+#                 #Apply unravel to a single element
+#                 coord = np.transpose(np.unravel_index( [random_flat_idx], shape0 ))[0]
 
-                # get data point and label
-                #inp_X = data_ordered[*coord,:,:].ravel()
-                #inp_y = trainlabels_list_np[*coord]             
-                #inp_X = data_ordered[tuple(coord),:,:].ravel()
-                #inp_y = trainlabels_list_np[tuple(coord)]
-                iset,Z,Y,X = coord
-                inp_X = data_ordered[iset,Z,Y,X,:,:].ravel()
-                inp_y = trainlabels_list_np[iset,Z,Y,X]
-                class_i = int(inp_y)
+#                 # get data point and label
+#                 #inp_X = data_ordered[*coord,:,:].ravel()
+#                 #inp_y = trainlabels_list_np[*coord]             
+#                 #inp_X = data_ordered[tuple(coord),:,:].ravel()
+#                 #inp_y = trainlabels_list_np[tuple(coord)]
+#                 iset,Z,Y,X = coord
+#                 inp_X = data_ordered[iset,Z,Y,X,:,:].ravel()
+#                 inp_y = trainlabels_list_np[iset,Z,Y,X]
+#                 class_i = int(inp_y)
 
-                if count_per_class[class_i] < max_items_per_class:
-                    #can add this element
-                    count_per_class[class_i]+=1
-                    X_train_test_subset[ielement]=inp_X
-                    y_train_test_subset[ielement]=inp_y
+#                 if count_per_class[class_i] < max_items_per_class:
+#                     #can add this element
+#                     count_per_class[class_i]+=1
+#                     X_train_test_subset[ielement]=inp_X
+#                     y_train_test_subset[ielement]=inp_y
 
-                    # if ielement % 4096 == 100:
-                    #     logging.info(f"ielement: {ielement}, inp_y:{inp_y}, count_per_class:{count_per_class}")
+#                     # if ielement % 4096 == 100:
+#                     #     logging.info(f"ielement: {ielement}, inp_y:{inp_y}, count_per_class:{count_per_class}")
 
-                    ielement+=1
-                    tqdm_pbar.update(1) # update increases by the value speicified
+#                     ielement+=1
+#                     tqdm_pbar.update(1) # update increases by the value speicified
 
-                    unique_flat_idxs.append(random_flat_idx)
+#                     unique_flat_idxs.append(random_flat_idx)
                 
-                if ielement>= ntotal:
-                    logging.info(f"Reached ielement>= ntotal : {ielement}>={ntotal}. Exiting for loop")
-                    break
+#                 if ielement>= ntotal:
+#                     logging.info(f"Reached ielement>= ntotal : {ielement}>={ntotal}. Exiting for loop")
+#                     break
 
-        else:
-            #Reach the end of the loop, number of elements should be adusted or just throw error
-            raise OverflowError(f"Reached the end of loop without collecting enough data points. count_per_class:{count_per_class}")
+#         else:
+#             #Reach the end of the loop, number of elements should be adusted or just throw error
+#             raise OverflowError(f"Reached the end of loop without collecting enough data points. count_per_class:{count_per_class}")
 
-    assert len(unique_flat_idxs)==ntotal
+#     assert len(unique_flat_idxs)==ntotal
 
-    logging.info(f"count_per_class:{count_per_class}")
+#     logging.info(f"count_per_class:{count_per_class}")
 
-    X_train_subset_t = torch.from_numpy(X_train_test_subset[:ntrain]).to(torch_device_str_nn2)
-    y_train_subset_t = torch.from_numpy(y_train_test_subset[:ntrain]).long().to(torch_device_str_nn2)
+#     X_train_subset_t = torch.from_numpy(X_train_test_subset[:ntrain]).to(torch_device_str_nn2)
+#     y_train_subset_t = torch.from_numpy(y_train_test_subset[:ntrain]).long().to(torch_device_str_nn2)
 
-    logging.info("X_train_subset_t and y_train_subset_t created")
+#     logging.info("X_train_subset_t and y_train_subset_t created")
 
-    dataset_X_y_train = TensorDataset(X_train_subset_t, y_train_subset_t)
-    nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, shuffle=True)
+#     dataset_X_y_train = TensorDataset(X_train_subset_t, y_train_subset_t)
+#     nn2_train_loader = DataLoader(dataset_X_y_train, batch_size=nn2_batch_size, shuffle=True)
 
-    logging.info("dataset_X_y_train created")
+#     logging.info("dataset_X_y_train created")
 
-    # test datasets
-    logging.info("Creating test dataset")
+#     # test datasets
+#     logging.info("Creating test dataset")
     
-    X_test_subset_t = torch.from_numpy(X_train_test_subset[ntrain:ntrain+ntest]).to(torch_device_str_nn2)
-    y_test_subset_t = torch.from_numpy(y_train_test_subset[ntrain:ntrain+ntest]).long().to(torch_device_str_nn2)
+#     X_test_subset_t = torch.from_numpy(X_train_test_subset[ntrain:ntrain+ntest]).to(torch_device_str_nn2)
+#     y_test_subset_t = torch.from_numpy(y_train_test_subset[ntrain:ntrain+ntest]).long().to(torch_device_str_nn2)
 
-    logging.info("X_test_subset_t and y_test_subset_t created")
+#     logging.info("X_test_subset_t and y_test_subset_t created")
 
-    dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
-    nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
+#     dataset_X_y_test = TensorDataset(X_test_subset_t, y_test_subset_t)
+#     nn2_test_loader = DataLoader(dataset_X_y_test, batch_size=nn2_batch_size, shuffle=True)
 
-    logging.info("dataset_X_y_test created")
+#     logging.info("dataset_X_y_test created")
 
-    _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader)
+#     _train_nn2_with_DLs(nn2_train_loader, nn2_test_loader)
 
 
 
@@ -1987,3 +2003,20 @@ def predict_from_data_list_using_max_prob_fusion(datavols_list):
 
     return fusion_preds
 
+def get_weightedrandomsampler_from_dataset(ds1:Dataset):
+
+    #Compensates class imbalance using WeightedRandomSampler
+    pixels_per_item_and_per_class = np.zeros((_N_CLASSES, len(ds1)) ) # initialize
+    for i,ds1_it in enumerate(ds1):
+        _,labels_tc = ds1_it
+        unique0, count0 = torch.unique(labels_tc, return_counts=True)
+        for class0, ccount in zip(unique0, count0):
+            pixels_per_item_and_per_class[class0,i]+=ccount
+        
+    counts_per_class = np.sum(pixels_per_item_and_per_class, axis=1 )
+    logging.info(f"counts_per_class: {counts_per_class}")
+    weighted = np.transpose(pixels_per_item_and_per_class) / counts_per_class
+    w_per_slice = np.sum(weighted, axis=1)
+
+    wrs = WeightedRandomSampler(w_per_slice, num_samples=len(ds1))
+    return wrs
